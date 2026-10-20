@@ -34,6 +34,7 @@
 //!   plans with single-use plan tokens, Level-2 File Rehearsal.
 //! - `error` — named errors with stable machine codes and fix paths.
 
+pub mod boot_rehearsal;
 pub mod capture;
 pub mod crypto;
 pub mod engine;
@@ -43,6 +44,7 @@ pub mod media;
 pub mod media_exec;
 pub mod media_verify;
 pub mod plain;
+pub mod recovery_card;
 pub mod safe_target;
 pub mod sets;
 pub mod system;
@@ -51,7 +53,16 @@ pub mod system_restore_exec;
 pub mod system_restore_verify;
 pub mod volume;
 
+pub use boot_rehearsal::{
+    assemble_report, read_rehearsal_record, record_vm_boot_outcome, validate_layout, vm_checklist,
+    write_rehearsal_record, BootRehearsalPlan, BootRehearsalReport, ChecklistStep, VmBootStatus,
+    VmFacts, NOT_BOOT_TESTED_LINE, REHEARSAL_RECORD_FILE, REHEARSAL_RECORD_FORMAT_VERSION,
+};
 pub use error::{ChunkCorruptReason, CoreError, Result};
+pub use recovery_card::{
+    format_unix_utc, render_card_html, render_card_text, validate_facts, DriveIdentification,
+    LastBackupFact, LastRehearsalFact, RecoveryCardFacts, BOOT_KEY_GUIDANCE, NO_PASSWORD_LINE,
+};
 
 // Prototype surface, re-exported at the crate root exactly as before.
 pub use plain::{ChunkStore, FileEntry, Manifest, VerifyReport, CHUNK_SIZE};

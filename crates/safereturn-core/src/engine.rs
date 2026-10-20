@@ -34,6 +34,10 @@
 //!   the sample is reproducible (seeded from the set id), so a rehearsal
 //!   result can be re-run and compared.
 
+use crate::boot_rehearsal::{
+    assemble_report, vm_checklist, write_rehearsal_record, BootRehearsalPlan, BootRehearsalReport,
+    VmFacts,
+};
 use crate::capture::{CaptureSource, LiveSource};
 use crate::error::{CoreError, Result};
 use crate::media::{
@@ -53,14 +57,17 @@ use crate::system_restore::{
     plan_system_restore_checked as compute_system_restore_plan_checked, SystemRestoreOptions,
     SystemRestorePlan as CoreSystemRestorePlan, SystemRestoreTargetFacts,
 };
-use crate::system_restore_exec::{SystemRestoreExecution, SystemRestoreExecutor};
+use crate::system_restore_exec::{
+    SimulatedDiskExecutor, SystemRestoreExecution, SystemRestoreExecutor,
+};
+use crate::system_restore_verify::verify_system_restore;
 use crate::volume::UnlockedVolume;
 use safereturn_contract::{
     BackupSummary, Event, JobOutcome, MediaPlan as ContractMediaPlan, RestorePlan,
     SystemRestorePlan as ContractSystemRestorePlan,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -752,6 +759,101 @@ impl Engine {
                 Err(e)
             }
         }
+    }
+
+    // -- Level-3 Boot Rehearsal (S6) --------------------------------------
+
+    /// Plan a Boot Rehearsal: the S5 system-restore plan for the
+    /// stated target, computed for a staging directory instead of a
+    /// disk, plus the guided checklist for the machine-only VM
+    /// steps. Erases nothing, writes nothing.
+    pub fn plan_boot_rehearsal(
+        &mut self,
+        backup_id: &str,
+        target: &SystemRestoreTargetFacts,
+        options: &SystemRestoreOptions,
+        staging_dir: &Path,
+        vm: Option<&VmFacts>,
+    ) -> Result<BootRehearsalPlan> {
+        let manifest = read_set_manifest(&self.volume, backup_id)?;
+        let restore_plan = compute_system_restore_plan_checked(
+            &manifest,
+            target,
+            options,
+            &SafeTargetAssessment::no_context(),
+        )?;
+        Ok(BootRehearsalPlan {
+            checklist: vm_checklist(&restore_plan, staging_dir, vm),
+            restore_plan,
+            staging_dir: staging_dir.display().to_string(),
+        })
+    }
+
+    /// Run a Boot Rehearsal: apply the plan to the staging
+    /// directory through the S5 simulation path (the production
+    /// chunk-restore code), verify the result partition by
+    /// partition, write the rehearsal record, and report. A damaged
+    /// set does not abort the run with a bare error: the
+    /// application failure is recorded in the report and
+    /// verification names the partitions that did not land. The job
+    /// finishes Succeeded only when the files verify and the layout
+    /// is valid; the VM boot is never claimed — see
+    /// boot_rehearsal::NOT_BOOT_TESTED_LINE.
+    pub fn run_boot_rehearsal(
+        &mut self,
+        backup_id: &str,
+        target: &SystemRestoreTargetFacts,
+        options: &SystemRestoreOptions,
+        staging_dir: &Path,
+        vm: Option<&VmFacts>,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<BootRehearsalReport> {
+        let planned = self.plan_boot_rehearsal(backup_id, target, options, staging_dir, vm)?;
+        let plan = &planned.restore_plan;
+        let job_id = self.next_job_id();
+        sink(Event::JobStarted {
+            job_id: job_id.clone(),
+        });
+        let executor = SimulatedDiskExecutor {
+            root: staging_dir.to_path_buf(),
+        };
+        let mut progress = |done: u64, total: u64| {
+            sink(Event::JobProgress {
+                job_id: job_id.clone(),
+                phase_id: "phase.boot_rehearsal".to_string(),
+                done,
+                total,
+                unit: "files".to_string(),
+            });
+        };
+        let application_error = match executor.execute(&self.volume, plan, &mut progress) {
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        };
+        let verify = verify_system_restore(plan, staging_dir)?;
+        let report = assemble_report(
+            plan,
+            staging_dir,
+            &verify,
+            application_error,
+            vm,
+            now_unix(),
+        );
+        write_rehearsal_record(staging_dir, &report)?;
+        sink(Event::JobFinished {
+            job_id,
+            outcome: if report.passed() {
+                JobOutcome::Succeeded
+            } else {
+                JobOutcome::Failed
+            },
+            summary_id: if report.files_verified {
+                "result.boot_rehearsal_files_verified".to_string()
+            } else {
+                "result.boot_rehearsal_verify_failed".to_string()
+            },
+        });
+        Ok(report)
     }
 
     // -- Level-2 File Rehearsal ------------------------------------------

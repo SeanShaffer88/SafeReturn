@@ -72,6 +72,10 @@ fn run() -> i32 {
     if cmd == "restore-system" {
         return run_restore_system(&args[1..]);
     }
+    // `rehearse-boot` (L3 Boot Rehearsal, S6) likewise.
+    if cmd == "rehearse-boot" {
+        return run_rehearse_boot(&args[1..]);
+    }
     let (pos, opts) = match parse_options(&args[1..]) {
         Ok(v) => v,
         Err(msg) => {
@@ -115,6 +119,9 @@ Usage:
   safereturn restore-system plan <volume> <set-id> --target-size <bytes> --serial-suffix <last4> --os-root <set root> --esp-root <set root> --firmware <uefi|bios> [--target-model <model>] [--removable] [--plan-out <file>]
   safereturn restore-system execute <volume> <set-id> --plan-token <id from restore-system plan> <same target flags as the plan> (--simulate <folder> | [--disk-index <n>] [--work-dir <folder>])
   safereturn restore-system verify <applied-root> --plan <plan file from restore-system plan --plan-out>
+  safereturn rehearse-boot plan <volume> <set-id> --staging <folder> <same target flags as restore-system plan> [--hyperv] [--edition <label>]
+  safereturn rehearse-boot run <volume> <set-id> --staging <folder> <same target flags as restore-system plan> [--hyperv] [--edition <label>]
+  safereturn rehearse-boot report <staging-folder> [--record-vm-boot <what happened> --source <who/what observed it>]
 
 Credentials (every command except init-volume):
   --passphrase <p>        passphrase (or set SAFERETURN_PASSPHRASE, or be prompted)
@@ -161,6 +168,20 @@ applied tree (e.g. a simulation folder) against a saved plan file:
 files in place, boot files present, WinRE present — and boot
 registration reported NOT VERIFIED, because file inspection cannot
 prove it.
+
+Boot Rehearsal (L3, S6): `rehearse-boot plan` computes the same plan
+a whole-PC restore would use, but for a staging folder, and prints
+the guided checklist for the machine-only VM steps (Hyper-V
+PowerShell commands as data when --hyperv is stated; the
+validation-only path otherwise). `rehearse-boot run` applies the
+plan into the staging folder through the same restore path a real
+restore uses, verifies every file partition by partition, and
+writes safereturn-rehearsal.json there. A rehearsal NEVER claims a
+boot: its report says \"not boot-tested\" until the on-machine step
+records the VM boot outcome with `rehearse-boot report <folder>
+--record-vm-boot \"<what happened>\" --source \"<who/what saw it>\"`.
+`rehearse-boot report` prints the stored record. Nothing in a
+rehearsal touches a real disk.
 
 Other flags: --json (contract JSON events), --yes (confirm a restore plan
 that replaces files), --keep-sandbox (rehearse-file: keep the sandbox)."
@@ -327,6 +348,7 @@ fn phase_label(id: &str) -> &str {
         "phase.file_rehearsal" => "Restoring sample files to a sandbox",
         "phase.building_media" => "Building recovery media",
         "phase.restoring_system" => "Restoring system files",
+        "phase.boot_rehearsal" => "Boot Rehearsal: applying the restore to a staging folder",
         other => other,
     }
 }
@@ -1674,6 +1696,242 @@ fn print_system_restore_verify(plan: &SystemRestorePlan, root: &Path) -> i32 {
             "Files: FAIL — see the lines above. Do not boot from this restore until they are resolved."
         );
         EXIT_FAIL
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot Rehearsal (L3, S6): plan / run / report. The target flags are
+// the restore-system ones (a rehearsal plans the same restore, onto
+// a staging folder instead of a disk); build_restore_target /
+// build_restore_options are reused unchanged.
+
+#[derive(Default)]
+struct RehearseBootOptions {
+    inner: RestoreSystemOptions,
+    staging: Option<PathBuf>,
+    hyperv: bool,
+    edition: Option<String>,
+    record_vm_boot: Option<String>,
+    record_source: Option<String>,
+}
+
+fn run_rehearse_boot(args: &[String]) -> i32 {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        eprintln!("Error: rehearse-boot needs a subcommand: plan, run, or report.");
+        print_usage();
+        return EXIT_USAGE;
+    };
+    let (pos, bopts) = match parse_rehearse_boot_options(&args[1..]) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    match sub {
+        "plan" => cmd_rehearse_boot_plan(&pos, &bopts, false),
+        "run" => cmd_rehearse_boot_plan(&pos, &bopts, true),
+        "report" => cmd_rehearse_boot_report(&pos, &bopts),
+        other => {
+            eprintln!(
+                "Error: unknown rehearse-boot subcommand '{other}' — use plan, run, or report."
+            );
+            EXIT_USAGE
+        }
+    }
+}
+
+fn parse_rehearse_boot_options(
+    args: &[String],
+) -> std::result::Result<(Vec<String>, RehearseBootOptions), String> {
+    // Reuse the restore-system parser for the shared flags by
+    // filtering out the rehearsal-only ones first.
+    let mut filtered: Vec<String> = Vec::new();
+    let mut bopts = RehearseBootOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].clone();
+        let take_value = |i: &mut usize| -> std::result::Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("flag {arg} needs a value"))
+        };
+        match arg.as_str() {
+            "--staging" => bopts.staging = Some(PathBuf::from(take_value(&mut i)?)),
+            "--hyperv" => bopts.hyperv = true,
+            "--edition" => bopts.edition = Some(take_value(&mut i)?),
+            "--record-vm-boot" => bopts.record_vm_boot = Some(take_value(&mut i)?),
+            "--source" => bopts.record_source = Some(take_value(&mut i)?),
+            _ => filtered.push(arg),
+        }
+        i += 1;
+    }
+    let (pos, inner) = parse_restore_system_options(&filtered)?;
+    bopts.inner = inner;
+    Ok((pos, bopts))
+}
+
+fn rehearse_vm_facts(bopts: &RehearseBootOptions) -> Option<VmFacts> {
+    if bopts.hyperv || bopts.edition.is_some() {
+        Some(VmFacts {
+            hyperv_available: bopts.hyperv,
+            edition: bopts.edition.clone(),
+        })
+    } else {
+        None
+    }
+}
+
+fn cmd_rehearse_boot_plan(pos: &[String], bopts: &RehearseBootOptions, run: bool) -> i32 {
+    if pos.len() < 2 {
+        eprintln!("Error: rehearse-boot plan/run needs <volume> <set-id>.");
+        return EXIT_USAGE;
+    }
+    let Some(staging) = &bopts.staging else {
+        eprintln!("Error: rehearse-boot needs --staging <folder> (where the rehearsal applies and verifies the restore).");
+        return EXIT_USAGE;
+    };
+    let unlocked = match unlock(&pos[0], &rs_credentials(&bopts.inner)) {
+        Ok(u) => u,
+        Err(e) => return report_error(&e),
+    };
+    let target = match build_restore_target(&bopts.inner) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    let options = match build_restore_options(&bopts.inner) {
+        Ok(o) => o,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    let vm = rehearse_vm_facts(bopts);
+    let mut engine = Engine::new(unlocked);
+    if !run {
+        let planned =
+            match engine.plan_boot_rehearsal(&pos[1], &target, &options, staging, vm.as_ref()) {
+                Ok(p) => p,
+                Err(e) => return report_error(&e),
+            };
+        print_system_restore_plan(&planned.restore_plan, bopts.inner.json);
+        print_checklist(&planned.checklist);
+        println!("Planning touched nothing. Run `rehearse-boot run` with the same flags to apply this plan to the staging folder and verify it.");
+        return EXIT_OK;
+    }
+    let mut sink = make_sink(bopts.inner.json);
+    let report = match engine.run_boot_rehearsal(
+        &pos[1],
+        &target,
+        &options,
+        staging,
+        vm.as_ref(),
+        &mut sink,
+    ) {
+        Ok(r) => r,
+        Err(e) => return report_error(&e),
+    };
+    print_boot_rehearsal_report(&report);
+    if report.passed() {
+        EXIT_OK
+    } else {
+        EXIT_FAIL
+    }
+}
+
+fn print_checklist(steps: &[ChecklistStep]) {
+    println!("Machine-only steps (guided — SafeReturn does not run these):");
+    for (i, step) in steps.iter().enumerate() {
+        println!("  {}. {}", i + 1, step.title);
+        if let Some(cmd) = &step.command {
+            println!("     run: {cmd}");
+        }
+        if let Some(note) = &step.note {
+            println!("     {note}");
+        }
+    }
+}
+
+fn print_boot_rehearsal_report(report: &BootRehearsalReport) {
+    println!("Boot Rehearsal report (plan {}):", report.plan_id);
+    println!("  {}", report.verdict_line());
+    for pv in &report.partitions {
+        let role = match pv.role {
+            PartitionRole::Esp => "EFI System Partition",
+            PartitionRole::Msr => "Microsoft Reserved (MSR)",
+            PartitionRole::Windows => "Windows",
+            PartitionRole::WinRe => "Windows RE tools",
+        };
+        println!("  {}: {}/{} files OK", role, pv.files_ok, pv.files_checked);
+        for m in &pv.missing {
+            println!("    MISSING {m}");
+        }
+        for m in &pv.mismatched {
+            println!("    DIFFERENT {m} (content does not match the backup)");
+        }
+    }
+    println!(
+        "  Layout: {}",
+        if report.layout_valid {
+            format!("valid — {}", report.layout_detail)
+        } else {
+            format!("INVALID — {}", report.layout_detail)
+        }
+    );
+    if let Some(err) = &report.application_error {
+        println!("  Applying the backup to staging failed: {err}");
+    }
+    println!(
+        "  Boot registration: NOT VERIFIED — file inspection cannot prove it (see the report's boot_registered fact)."
+    );
+    match &report.vm_boot {
+        VmBootStatus::NotBootTested => {
+            println!("  VM boot: not boot-tested (see the verdict line).")
+        }
+        VmBootStatus::Recorded {
+            outcome, source, ..
+        } => println!("  VM boot: recorded — {outcome} (source: {source})"),
+    }
+    println!(
+        "  Record: {} in {}",
+        REHEARSAL_RECORD_FILE, report.staging_dir
+    );
+}
+
+fn cmd_rehearse_boot_report(pos: &[String], bopts: &RehearseBootOptions) -> i32 {
+    let Some(staging) = pos.first() else {
+        eprintln!("Error: rehearse-boot report needs the staging folder.");
+        return EXIT_USAGE;
+    };
+    let staging = Path::new(staging);
+    if let Some(outcome) = &bopts.record_vm_boot {
+        let Some(source) = &bopts.record_source else {
+            eprintln!("Error: --record-vm-boot needs --source <who/what observed it> — an unsourced boot claim is not recorded.");
+            return EXIT_USAGE;
+        };
+        return match record_vm_boot_outcome(staging, outcome, source, now_unix()) {
+            Ok(report) => {
+                println!("Recorded. The rehearsal record now reads:");
+                print_boot_rehearsal_report(&report);
+                EXIT_OK
+            }
+            Err(e) => report_error(&e),
+        };
+    }
+    match read_rehearsal_record(staging) {
+        Ok(report) => {
+            print_boot_rehearsal_report(&report);
+            if report.passed() {
+                EXIT_OK
+            } else {
+                EXIT_FAIL
+            }
+        }
+        Err(e) => report_error(&e),
     }
 }
 
