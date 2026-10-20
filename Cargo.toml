@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/safereturn-contract",
+    "crates/safereturn-core",
+    "crates/safereturn-vss",
+]

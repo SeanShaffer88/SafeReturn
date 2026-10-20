@@ -1,0 +1,9 @@
+{
+  "kind": "event",
+  "type": "job_progress",
+  "job_id": "job-1",
+  "phase_id": "phase.copying_files",
+  "done": 42,
+  "total": 100,
+  "unit": "files"
+}

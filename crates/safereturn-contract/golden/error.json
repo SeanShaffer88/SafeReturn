@@ -1,0 +1,7 @@
+{
+  "kind": "event",
+  "type": "error",
+  "code": "vss.writer_failed",
+  "message_id": "error.vss_writer_failed",
+  "what_was_not_changed_id": "error.nothing_changed"
+}

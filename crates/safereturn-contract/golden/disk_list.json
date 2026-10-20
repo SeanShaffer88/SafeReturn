@@ -1,0 +1,16 @@
+{
+  "kind": "event",
+  "type": "disk_list",
+  "disks": [
+    {
+      "disk_id": "disk-2",
+      "model": "Seagate Backup Plus",
+      "serial_suffix": "X7K2",
+      "size_bytes": 2000000000000,
+      "free_bytes": 1800000000000,
+      "is_system_disk": false,
+      "is_removable": true,
+      "warnings": []
+    }
+  ]
+}

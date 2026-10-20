@@ -1,0 +1,11 @@
+[package]
+name = "safereturn-vss"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# NOTE: no `windows` crate VSS dependency — S0 finding: windows 0.61.3's
+# Win32::Storage::Vss module omits the requester interface
+# IVssBackupComponents entirely (writer/provider interfaces only).
+# The requester is reached via the C++ helper in cpp/ (real vsbackup.h)
+# through the narrow C ABI declared in src/win.rs.

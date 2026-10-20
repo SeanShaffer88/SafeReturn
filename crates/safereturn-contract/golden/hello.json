@@ -1,0 +1,10 @@
+{
+  "kind": "request",
+  "id": 1,
+  "body": {
+    "type": "hello",
+    "contract_version": 1,
+    "shell": "win_ui_desktop",
+    "shell_version": "0.1.0"
+  }
+}

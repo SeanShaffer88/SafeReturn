@@ -1,2 +1,81 @@
 # SafeReturn
-Full disk backup for ordinary users
+
+Full-disk backup and recovery for ordinary Windows users — bootable system
+backups, verification, and restore of individual files or the whole PC through
+a guided interface.
+
+Most backup tools will tell you a backup "completed." Almost none will prove
+it can bring your PC back. SafeReturn is built around that proof.
+
+## The standout: Recovery Rehearsal
+
+Recovery you can understand and **test before a crisis**, in four levels:
+
+1. **Quick Check** — every chunk of the backup is re-hashed; boot components
+   (EFI / BCD / WinRE) are confirmed present.
+2. **File Rehearsal** — files you choose (plus a random sample) are restored
+   to a sandbox folder and verified byte-for-byte.
+3. **Boot Rehearsal** — the backup is restored to a virtual disk and actually
+   booted, without touching your real disk.
+4. **Full Dress Rehearsal** — a guided whole-PC restore to a spare disk using
+   the exact recovery flow a real disaster would use.
+
+After a successful rehearsal, SafeReturn produces a printable **Recovery
+Card**: which drive to plug in, which USB to boot from, and steps 1-2-3 in
+large type, written for a stressed non-technical reader.
+
+Honesty is a design rule here: no invented "health score." The app shows
+facts — last backup time, which rehearsals passed and when — and says
+"Not tested yet" when a rehearsal has never run.
+
+## Status
+
+**Pre-alpha.** Architecture and the riskiest technical spike (S0) are done;
+there is no installable product yet. What exists today:
+
+- A content-addressed chunk store (SHA-256) with manifests, file restore, and
+  a verification pass that detects corruption (`safereturn-core`, with tests,
+  including a test that proves corrupted chunks are caught).
+- A VSS requester spike: the documented Windows Volume Shadow Copy sequence
+  as a tested state machine, plus a narrow C++ helper that talks to the real
+  VSS API (`safereturn-vss`). Compiling that helper on Windows is verified by
+  CI — see the note under *Building*.
+- The shell ↔ engine message contract shared by the future WinUI 3 desktop
+  app, the Win32 recovery shell for WinPE, and the CLI
+  (`safereturn-contract`, with golden JSON fixtures).
+
+License: GPL-2.0 (see `LICENSE`).
+
+## Layout
+
+```text
+crates/
+  safereturn-contract/   Message types between shells and engine (+ golden fixtures)
+  safereturn-core/       Chunk store, manifests, verify, file restore
+  safereturn-vss/        VSS requester state machine + C++ helper (cpp/)
+docs/
+  ARCHITECTURE_AND_UX_PLAN.md
+  S0_FINDINGS.md
+  SHELL_CONTRACT.md
+```
+
+## Building
+
+Requires a stable Rust toolchain. On any OS:
+
+```sh
+cargo fmt --all
+cargo test --workspace
+```
+
+Windows-target compile check (works from Linux/macOS with the target
+installed via `rustup target add x86_64-pc-windows-msvc`):
+
+```sh
+cargo check --workspace --target x86_64-pc-windows-msvc
+```
+
+The C++ VSS helper (`crates/safereturn-vss/cpp/vss_helper.cpp`) builds only on
+Windows against the Windows SDK (`VssApi.lib`). The Windows CI job compiles it
+on every push — that compile is the verification the S0 spike was designed to
+produce.

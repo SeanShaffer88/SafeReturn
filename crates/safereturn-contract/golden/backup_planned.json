@@ -1,0 +1,11 @@
+{
+  "kind": "event",
+  "type": "backup_planned",
+  "destination_disk_id": "disk-2",
+  "estimated_backup_bytes": 240000000000,
+  "destination_free_bytes": 1800000000000,
+  "verdict": "fits",
+  "summary_line_ids": [
+    "plan.will_copy_everything"
+  ]
+}

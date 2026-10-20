@@ -1,0 +1,7 @@
+{
+  "kind": "event",
+  "type": "job_finished",
+  "job_id": "job-1",
+  "outcome": "failed",
+  "summary_id": "result.backup_failed_writer"
+}
