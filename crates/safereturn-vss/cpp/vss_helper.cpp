@@ -30,6 +30,11 @@
 #include <windows.h>
 #include <objbase.h>
 #include <vss.h>
+#include <vswriter.h>  // Required: Learn's vsbackup.h requirements list
+                       // "include VsBackup.h, Vss.h, VsWriter.h". Without
+                       // it, CI run #3 failed inside vsbackup.h itself —
+                       // VSS_COMPONENT_TYPE, IVssWMFiledesc and friends
+                       // are defined here, not in vss.h.
 #include <vsbackup.h>
 #include <cstring>
 
