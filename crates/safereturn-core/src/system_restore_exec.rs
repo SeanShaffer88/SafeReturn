@@ -101,6 +101,11 @@ pub struct RestoreLog {
     pub applied_unix: u64,
     pub target: SystemRestoreTargetFacts,
     pub warnings: Vec<SystemRestoreWarning>,
+    /// SafeTarget warning ids explicitly acknowledged in the plan
+    /// flow (S6), copied from the plan — the on-disk record that a
+    /// warned target was confirmed by the user, not slipped past.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safety_acknowledgments: Vec<String>,
     pub post_steps: Vec<RecordedPostStep>,
 }
 
@@ -114,6 +119,7 @@ impl RestoreLog {
             applied_unix: crate::engine::now_unix(),
             target: plan.target.clone(),
             warnings: plan.warnings.clone(),
+            safety_acknowledgments: plan.safety_acknowledgments.clone(),
             post_steps: plan
                 .post_steps
                 .iter()

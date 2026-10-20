@@ -267,6 +267,13 @@ pub struct MediaPlan {
     pub warnings: Vec<MediaWarning>,
     pub payload_total_bytes: u64,
     pub override_non_removable: bool,
+    /// SafeTarget warning ids the user explicitly acknowledged in
+    /// the plan flow (S6) — e.g. confirming that the target is the
+    /// running system's disk. Recorded proof, never silent. Empty
+    /// (and omitted from the JSON, preserving pre-S6 plan ids) for
+    /// plans made without a SafeTarget assessment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safety_acknowledgments: Vec<String>,
 }
 
 fn align_up(value: u64, alignment: u64) -> u64 {
@@ -347,7 +354,51 @@ pub(crate) fn check_dest_rel(dest_rel: &str) -> Result<()> {
 /// paths, empty driver entries), missing WinPE source, target under
 /// the 8 GiB minimum, non-removable target without the explicit
 /// override, and payload/layout that cannot fit (see compute_layout).
+///
+/// This entry point takes no SafeTarget assessment: it performs no
+/// identity checks. The non-removable refusal above is the media
+/// flow's own long-standing override (recorded in the plan); the
+/// identity checks live in `plan_media_checked`, used by the
+/// engine's guarded entry point.
 pub fn plan_media(facts: &MediaFacts, options: &MediaPlanOptions) -> Result<MediaPlan> {
+    plan_media_checked(
+        facts,
+        options,
+        &crate::safe_target::SafeTargetAssessment::no_context(),
+    )
+}
+
+/// `plan_media` with a SafeTarget assessment enforced first (S6):
+/// a refusal in the assessment (the target IS — or might be — the
+/// source, backup, or media disk) is a typed refusal here; a
+/// warning the user has not acknowledged is a typed
+/// override-required error; acknowledged warnings are recorded in
+/// the plan's `safety_acknowledgments`. The assessment's
+/// non-removable warning, when present, is governed by the media
+/// flow's own override (`MediaPlanOptions::allow_non_removable`)
+/// rather than by acknowledgment: that override predates SafeTarget,
+/// is recorded in the plan and the media manifest, and remains the
+/// single mechanism for fixed media targets.
+pub fn plan_media_checked(
+    facts: &MediaFacts,
+    options: &MediaPlanOptions,
+    assessment: &crate::safe_target::SafeTargetAssessment,
+) -> Result<MediaPlan> {
+    if let Some((reason_id, detail)) = assessment.first_refusal() {
+        return Err(CoreError::SafeTargetRefused {
+            reason_id: reason_id.to_string(),
+            detail: detail.to_string(),
+        });
+    }
+    for (warning_id, detail) in assessment.unacknowledged_warnings() {
+        if warning_id == crate::safe_target::WARNING_NON_REMOVABLE {
+            continue; // governed by MediaPlanOptions::allow_non_removable below
+        }
+        return Err(CoreError::SafeTargetOverrideRequired {
+            warning_id: warning_id.to_string(),
+            detail: detail.to_string(),
+        });
+    }
     if facts.target.serial_suffix.chars().count() != 4 {
         return Err(CoreError::MediaInvalidFacts {
             reason: format!(
@@ -431,6 +482,11 @@ pub fn plan_media(facts: &MediaFacts, options: &MediaPlanOptions) -> Result<Medi
         warnings,
         payload_total_bytes: payload_total,
         override_non_removable: options.allow_non_removable && !facts.target.removable,
+        safety_acknowledgments: assessment
+            .acknowledged_applied()
+            .into_iter()
+            .filter(|id| id != crate::safe_target::WARNING_NON_REMOVABLE)
+            .collect(),
     };
     plan.plan_id = compute_plan_id(&plan)?;
     Ok(plan)
@@ -485,7 +541,12 @@ pub fn write_media_manifest(
         plan_id: plan.plan_id.clone(),
         created_unix,
         created_by_version: env!("CARGO_PKG_VERSION").to_string(),
-        warnings_shown: plan.warnings.iter().map(|w| w.id().to_string()).collect(),
+        warnings_shown: plan
+            .warnings
+            .iter()
+            .map(|w| w.id().to_string())
+            .chain(plan.safety_acknowledgments.iter().cloned())
+            .collect(),
         boot_partition_bytes: plan.layout.boot_partition_bytes,
         data_partition_bytes: plan.layout.data_partition_bytes,
         payload: plan.facts.payload.clone(),

@@ -246,6 +246,21 @@ pub enum CoreError {
     SystemRestoreExecutorNotReady {
         detail: String,
     },
+    /// SafeTarget refused the target: it IS one of the protected
+    /// disks (source / backup / recovery-media), or the facts
+    /// cannot prove it is not. Nothing was planned or touched (S6).
+    SafeTargetRefused {
+        reason_id: String,
+        detail: String,
+    },
+    /// SafeTarget allowed the target only with a warning the user
+    /// has not explicitly acknowledged in the plan flow. Planning
+    /// again with the warning acknowledged (and thereby recorded in
+    /// the plan) is the only path forward (S6).
+    SafeTargetOverrideRequired {
+        warning_id: String,
+        detail: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
@@ -297,6 +312,8 @@ impl CoreError {
             CoreError::SystemRestorePlanStale { .. } => "system_restore.plan_stale",
             CoreError::SystemRestoreLiveNotEnabled { .. } => "system_restore.live_not_enabled",
             CoreError::SystemRestoreExecutorNotReady { .. } => "system_restore.executor_not_ready",
+            CoreError::SafeTargetRefused { .. } => "target.refused",
+            CoreError::SafeTargetOverrideRequired { .. } => "target.override_required",
         }
     }
 }
@@ -480,6 +497,14 @@ impl fmt::Display for CoreError {
             CoreError::SystemRestoreExecutorNotReady { detail } => write!(
                 f,
                 "the real-disk restore executor is not ready to run: {detail}. Nothing was erased."
+            ),
+            CoreError::SafeTargetRefused { reason_id, detail } => write!(
+                f,
+                "this disk cannot be used as the target ({reason_id}): {detail}. Nothing was planned or touched. Pick a different disk."
+            ),
+            CoreError::SafeTargetOverrideRequired { warning_id, detail } => write!(
+                f,
+                "this target needs an explicit confirmation before it can be planned ({warning_id}): {detail}. Nothing was planned or touched. Confirm the warning in the plan flow to proceed — the confirmation is recorded in the plan."
             ),
         }
     }

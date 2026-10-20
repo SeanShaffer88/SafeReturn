@@ -47,6 +47,7 @@
 //! refused — it could only produce an unbootable disk.
 
 use crate::error::{CoreError, Result};
+use crate::safe_target::SafeTargetAssessment;
 use crate::sets::{SetFileEntry, SetManifest};
 use crate::system::{BitLockerState, BootMode, Fact};
 use crate::volume::sha256_hex;
@@ -400,6 +401,14 @@ pub struct SystemRestorePlan {
     pub required_boot_files: Vec<String>,
     pub post_steps: Vec<SystemRestorePostStep>,
     pub warnings: Vec<SystemRestoreWarning>,
+    /// SafeTarget warning ids the user explicitly acknowledged in
+    /// the plan flow (S6): the recorded proof that a warned target
+    /// (e.g. a non-removable internal disk) was confirmed, not
+    /// silently allowed. Empty for plans made without a SafeTarget
+    /// assessment; omitted from the JSON then, so such plans keep
+    /// their pre-S6 plan ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safety_acknowledgments: Vec<String>,
 }
 
 impl SystemRestorePlan {
@@ -428,11 +437,49 @@ fn invalid(reason: String) -> CoreError {
 /// Refusal order: malformed target facts → set is not a system set →
 /// firmware refusals (unsupported / unknown / mismatch) → root
 /// mapping problems → missing boot content → target too small.
+///
+/// This entry point takes no SafeTarget assessment: it performs no
+/// identity checks and records no acknowledgments. Callers that
+/// enumerated real disks (the shells, via the engine's guarded
+/// entry points) use `plan_system_restore_checked`.
 pub fn plan_system_restore(
     manifest: &SetManifest,
     target: &SystemRestoreTargetFacts,
     options: &SystemRestoreOptions,
 ) -> Result<SystemRestorePlan> {
+    plan_system_restore_checked(
+        manifest,
+        target,
+        options,
+        &SafeTargetAssessment::no_context(),
+    )
+}
+
+/// `plan_system_restore` with a SafeTarget assessment enforced
+/// first (S6): a refusal in the assessment is a typed refusal here;
+/// a warning the user has not acknowledged is a typed
+/// override-required error; acknowledged warnings are recorded in
+/// the plan's `safety_acknowledgments`. SafeTarget is checked
+/// before everything else — a plan for a protected disk is refused
+/// before any other fact is even examined.
+pub fn plan_system_restore_checked(
+    manifest: &SetManifest,
+    target: &SystemRestoreTargetFacts,
+    options: &SystemRestoreOptions,
+    assessment: &SafeTargetAssessment,
+) -> Result<SystemRestorePlan> {
+    if let Some((reason_id, detail)) = assessment.first_refusal() {
+        return Err(CoreError::SafeTargetRefused {
+            reason_id: reason_id.to_string(),
+            detail: detail.to_string(),
+        });
+    }
+    if let Some((warning_id, detail)) = assessment.unacknowledged_warnings().into_iter().next() {
+        return Err(CoreError::SafeTargetOverrideRequired {
+            warning_id: warning_id.to_string(),
+            detail: detail.to_string(),
+        });
+    }
     if target.serial_suffix.chars().count() != 4 {
         return Err(invalid(format!(
             "target serial suffix must be exactly the last 4 characters, got '{}'",
@@ -891,6 +938,7 @@ pub fn plan_system_restore(
             .collect(),
         post_steps,
         warnings,
+        safety_acknowledgments: assessment.acknowledged_applied(),
     };
     plan.plan_id = compute_plan_id(&plan)?;
     Ok(plan)

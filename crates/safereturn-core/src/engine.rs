@@ -37,17 +37,20 @@
 use crate::capture::{CaptureSource, LiveSource};
 use crate::error::{CoreError, Result};
 use crate::media::{
-    plan_media as compute_media_plan, MediaFacts, MediaPlan as CoreMediaPlan, MediaPlanOptions,
-    MediaTargetFacts,
+    plan_media_checked as compute_media_plan_checked, MediaFacts, MediaPlan as CoreMediaPlan,
+    MediaPlanOptions, MediaTargetFacts,
 };
 use crate::media_exec::MediaExecutor;
+use crate::safe_target::{
+    assess_media_target, assess_system_restore_target, SafeTargetAssessment, SafeTargetContext,
+};
 use crate::sets::{
     backup_tree_with_source, hash_existing_file, list_sets, read_set_manifest, restore_entries,
     verify_set, BackupOutcome, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport,
     TargetState,
 };
 use crate::system_restore::{
-    plan_system_restore as compute_system_restore_plan, SystemRestoreOptions,
+    plan_system_restore_checked as compute_system_restore_plan_checked, SystemRestoreOptions,
     SystemRestorePlan as CoreSystemRestorePlan, SystemRestoreTargetFacts,
 };
 use crate::system_restore_exec::{SystemRestoreExecution, SystemRestoreExecutor};
@@ -418,13 +421,46 @@ impl Engine {
     /// non-removable without override, missing WinPE source) surface
     /// as their named errors. On success, emits MediaPlanned with a
     /// single-use token bound to this exact plan.
+    ///
+    /// This entry point takes no SafeTarget context: no identity
+    /// checks are performed. Shells that enumerated real disks use
+    /// `plan_media_guarded`.
     pub fn plan_media(
         &mut self,
         facts: &MediaFacts,
         options: &MediaPlanOptions,
         sink: &mut dyn FnMut(Event),
     ) -> Result<ContractMediaPlan> {
-        let core_plan = compute_media_plan(facts, options)?;
+        self.plan_media_inner(facts, options, &SafeTargetAssessment::no_context(), sink)
+    }
+
+    /// PlanMedia with SafeTarget enforcement (S6): the target is
+    /// checked against the context's protected disks (source /
+    /// backup / running media) and its own system-disk flag before
+    /// planning. A refusal or an unacknowledged warning is a typed
+    /// error and NO plan token is created; acknowledged warnings are
+    /// recorded in the plan. This is the entry point shells use —
+    /// enforcement lives here in the engine, not in shell advice.
+    pub fn plan_media_guarded(
+        &mut self,
+        facts: &MediaFacts,
+        options: &MediaPlanOptions,
+        context: &SafeTargetContext,
+        target_is_system_disk: bool,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<ContractMediaPlan> {
+        let assessment = assess_media_target(&facts.target, target_is_system_disk, context);
+        self.plan_media_inner(facts, options, &assessment, sink)
+    }
+
+    fn plan_media_inner(
+        &mut self,
+        facts: &MediaFacts,
+        options: &MediaPlanOptions,
+        assessment: &SafeTargetAssessment,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<ContractMediaPlan> {
+        let core_plan = compute_media_plan_checked(facts, options, assessment)?;
         let token = new_plan_token()?;
         let summary = ContractMediaPlan {
             plan_token: token.clone(),
@@ -447,6 +483,7 @@ impl Engine {
                 .warnings
                 .iter()
                 .map(|w| w.id().to_string())
+                .chain(core_plan.safety_acknowledgments.iter().cloned())
                 .collect(),
         };
         self.media_plans.insert(
@@ -541,6 +578,10 @@ impl Engine {
     /// problems, missing boot files, target too small) surface as
     /// their named errors. On success, emits SystemRestorePlanned
     /// with a single-use token bound to this exact plan.
+    ///
+    /// This entry point takes no SafeTarget context: no identity
+    /// checks are performed. Shells that enumerated real disks use
+    /// `plan_system_restore_guarded`.
     pub fn plan_system_restore(
         &mut self,
         backup_id: &str,
@@ -548,8 +589,47 @@ impl Engine {
         options: &SystemRestoreOptions,
         sink: &mut dyn FnMut(Event),
     ) -> Result<ContractSystemRestorePlan> {
+        self.plan_system_restore_inner(
+            backup_id,
+            target,
+            options,
+            &SafeTargetAssessment::no_context(),
+            sink,
+        )
+    }
+
+    /// PlanSystemRestore with SafeTarget enforcement (S6): the
+    /// target is checked against the context's protected disks
+    /// (source / backup / running media) and its own system-disk
+    /// flag before planning. A refusal or an unacknowledged warning
+    /// is a typed error and NO plan token is created; acknowledged
+    /// warnings are recorded in the plan and its restore log. This
+    /// is the entry point shells use — enforcement lives here in
+    /// the engine, not in shell advice.
+    pub fn plan_system_restore_guarded(
+        &mut self,
+        backup_id: &str,
+        target: &SystemRestoreTargetFacts,
+        options: &SystemRestoreOptions,
+        context: &SafeTargetContext,
+        target_is_system_disk: bool,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<ContractSystemRestorePlan> {
+        let assessment = assess_system_restore_target(target, target_is_system_disk, context);
+        self.plan_system_restore_inner(backup_id, target, options, &assessment, sink)
+    }
+
+    fn plan_system_restore_inner(
+        &mut self,
+        backup_id: &str,
+        target: &SystemRestoreTargetFacts,
+        options: &SystemRestoreOptions,
+        assessment: &SafeTargetAssessment,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<ContractSystemRestorePlan> {
         let manifest = read_set_manifest(&self.volume, backup_id)?;
-        let core_plan = compute_system_restore_plan(&manifest, target, options)?;
+        let core_plan =
+            compute_system_restore_plan_checked(&manifest, target, options, assessment)?;
         let token = new_plan_token()?;
         let summary = ContractSystemRestorePlan {
             plan_token: token.clone(),
@@ -575,6 +655,7 @@ impl Engine {
                 .warnings
                 .iter()
                 .map(|w| w.id().to_string())
+                .chain(core_plan.safety_acknowledgments.iter().cloned())
                 .collect(),
         };
         self.system_restore_plans.insert(

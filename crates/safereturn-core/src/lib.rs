@@ -27,6 +27,9 @@
 //!   computed whole-PC restore plan (GPT layout with sourced
 //!   defaults, per-partition file application, bcdboot/reagentc
 //!   post steps as data, typed refusals).
+//! - `safe_target` — SafeTarget checks (S6): identity-checked
+//!   target verdicts (refuse / warn / allow) enforced by the
+//!   planners and the engine's guarded plan entry points.
 //! - `engine` — the shell-contract-facing API: contract events, restore
 //!   plans with single-use plan tokens, Level-2 File Rehearsal.
 //! - `error` — named errors with stable machine codes and fix paths.
@@ -40,6 +43,7 @@ pub mod media;
 pub mod media_exec;
 pub mod media_verify;
 pub mod plain;
+pub mod safe_target;
 pub mod sets;
 pub mod system;
 pub mod system_restore;
@@ -59,11 +63,11 @@ pub use engine::{
     format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry, FileRehearsalReport,
 };
 pub use media::{
-    plan_media, read_media_manifest, write_media_manifest, MediaFacts, MediaLayout, MediaManifest,
-    MediaPlan, MediaPlanOptions, MediaStep, MediaTargetFacts, MediaWarning, PayloadFact,
-    WinPeSourceFacts, FAT32_MAX_BYTES, MEDIA_MANIFEST_FILE, MEDIA_MANIFEST_FORMAT_VERSION,
-    MIN_BOOT_PARTITION_BYTES, MIN_DATA_PARTITION_BYTES, MIN_TARGET_BYTES,
-    PARTITION_ALIGNMENT_BYTES, WINPE_OPTIONAL_COMPONENTS,
+    plan_media, plan_media_checked, read_media_manifest, write_media_manifest, MediaFacts,
+    MediaLayout, MediaManifest, MediaPlan, MediaPlanOptions, MediaStep, MediaTargetFacts,
+    MediaWarning, PayloadFact, WinPeSourceFacts, FAT32_MAX_BYTES, MEDIA_MANIFEST_FILE,
+    MEDIA_MANIFEST_FORMAT_VERSION, MIN_BOOT_PARTITION_BYTES, MIN_DATA_PARTITION_BYTES,
+    MIN_TARGET_BYTES, PARTITION_ALIGNMENT_BYTES, WINPE_OPTIONAL_COMPONENTS,
 };
 #[cfg(windows)]
 pub use media_exec::WindowsAdkExecutor;
@@ -72,6 +76,12 @@ pub use media_verify::{
     record_boot_test, verify_media, verify_media_roots, BootFileCheck, BootTestMarker,
     BootTestStatus, MediaVerifyReport, PayloadCheck, BOOT_TEST_MARKER_FILE,
     BOOT_TEST_MARKER_FORMAT_VERSION, REQUIRED_BOOT_FILES,
+};
+pub use safe_target::{
+    assess_media_target, assess_system_restore_target, check_target, identity_relation,
+    DiskIdentity, IdentityRelation, SafeTargetAssessment, SafeTargetContext, SafeTargetVerdict,
+    TargetDiskFacts, REASON_IDENTITY_AMBIGUOUS, REASON_IS_BACKUP_DISK, REASON_IS_MEDIA_DISK,
+    REASON_IS_SOURCE_DISK, WARNING_IS_SYSTEM_DISK, WARNING_NON_REMOVABLE,
 };
 pub use sets::{
     attach_system_facts, backup_tree, backup_tree_with_source, list_set_ids, list_sets,
@@ -88,12 +98,12 @@ pub use system::{
     SYSTEM_FACTS_FORMAT_VERSION,
 };
 pub use system_restore::{
-    plan_system_restore, ApplyFileStep, PartitionFilesystem, PartitionRole, PartitionSpec,
-    SystemRestoreOptions, SystemRestorePlan, SystemRestorePostStep, SystemRestoreTargetFacts,
-    SystemRestoreWarning, ESP_CONTENT_HEADROOM_BYTES, ESP_DEFAULT_BYTES, ESP_TYPE_GUID,
-    GPT_END_RESERVE_BYTES, GPT_FRONT_RESERVE_BYTES, MSR_BYTES, REQUIRED_ESP_BOOT_FILES,
-    WINDOWS_HEADROOM_MIN_BYTES, WINRE_FREE_HEADROOM_BYTES, WINRE_GPT_ATTRIBUTES,
-    WINRE_IMAGE_DEST_REL, WINRE_MIN_BYTES, WINRE_TYPE_GUID,
+    plan_system_restore, plan_system_restore_checked, ApplyFileStep, PartitionFilesystem,
+    PartitionRole, PartitionSpec, SystemRestoreOptions, SystemRestorePlan, SystemRestorePostStep,
+    SystemRestoreTargetFacts, SystemRestoreWarning, ESP_CONTENT_HEADROOM_BYTES, ESP_DEFAULT_BYTES,
+    ESP_TYPE_GUID, GPT_END_RESERVE_BYTES, GPT_FRONT_RESERVE_BYTES, MSR_BYTES,
+    REQUIRED_ESP_BOOT_FILES, WINDOWS_HEADROOM_MIN_BYTES, WINRE_FREE_HEADROOM_BYTES,
+    WINRE_GPT_ATTRIBUTES, WINRE_IMAGE_DEST_REL, WINRE_MIN_BYTES, WINRE_TYPE_GUID,
 };
 #[cfg(windows)]
 pub use system_restore_exec::WindowsDiskExecutor;
