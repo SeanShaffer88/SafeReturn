@@ -76,6 +76,11 @@ fn run() -> i32 {
     if cmd == "rehearse-boot" {
         return run_rehearse_boot(&args[1..]);
     }
+    // `recovery-card` (S6) is a standalone generator with its own
+    // fact flags; it needs no volume unless --volume is given.
+    if cmd == "recovery-card" {
+        return run_recovery_card(&args[1..]);
+    }
     let (pos, opts) = match parse_options(&args[1..]) {
         Ok(v) => v,
         Err(msg) => {
@@ -122,6 +127,7 @@ Usage:
   safereturn rehearse-boot plan <volume> <set-id> --staging <folder> <same target flags as restore-system plan> [--hyperv] [--edition <label>]
   safereturn rehearse-boot run <volume> <set-id> --staging <folder> <same target flags as restore-system plan> [--hyperv] [--edition <label>]
   safereturn rehearse-boot report <staging-folder> [--record-vm-boot <what happened> --source <who/what observed it>]
+  safereturn recovery-card --out <file> [--format <html|text>] --pc <description> --backup-model <model> --backup-serial <last4> [--backup-label <label>] [--media-model <model> --media-serial <last4> [--media-label <label>]] [--boot-key <key>] [--password-hint-location <text>] [--volume <folder> [--passphrase <pw> | --recovery-key <file>] [--set <set-id>]] [--rehearsal-staging <folder>]
 
 Credentials (every command except init-volume):
   --passphrase <p>        passphrase (or set SAFERETURN_PASSPHRASE, or be prompted)
@@ -182,6 +188,19 @@ records the VM boot outcome with `rehearse-boot report <folder>
 --record-vm-boot \"<what happened>\" --source \"<who/what saw it>\"`.
 `rehearse-boot report` prints the stored record. Nothing in a
 rehearsal touches a real disk.
+
+Recovery Card (S6): `recovery-card` generates the printable card
+(HTML by default when --out ends in .html, else plain text; force
+with --format). The facts are inputs, stated by you: which PC, the
+backup drive (model + last 4 of its serial + its label), the
+recovery USB if one exists, and the PC's boot-menu key if you know
+it (unknown prints a generic vendor key table, marked as guidance).
+--password-hint-location takes the LOCATION where your password is
+kept (\"in the fire safe\") — the card has no way to hold a password
+and every card prints \"This card never contains your password.\"
+With --volume (and its unlock flags) the newest backup (or --set)
+fills the last-backup line; --rehearsal-staging fills the last
+rehearsal line from a Boot Rehearsal record.
 
 Other flags: --json (contract JSON events), --yes (confirm a restore plan
 that replaces files), --keep-sandbox (rehearse-file: keep the sandbox)."
@@ -1933,6 +1952,228 @@ fn cmd_rehearse_boot_report(pos: &[String], bopts: &RehearseBootOptions) -> i32 
         }
         Err(e) => report_error(&e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Card (S6): generate the printable card from stated
+// facts. The card generator's API has no passphrase parameter by
+// design; --password-hint-location is a location string only.
+
+#[derive(Default)]
+struct CardCliOptions {
+    out: Option<PathBuf>,
+    format: Option<String>,
+    pc: Option<String>,
+    backup_model: Option<String>,
+    backup_serial: Option<String>,
+    backup_label: Option<String>,
+    media_model: Option<String>,
+    media_serial: Option<String>,
+    media_label: Option<String>,
+    boot_key: Option<String>,
+    hint_location: Option<String>,
+    volume: Option<PathBuf>,
+    set: Option<String>,
+    passphrase: Option<String>,
+    recovery_key: Option<PathBuf>,
+    rehearsal_staging: Option<PathBuf>,
+}
+
+fn run_recovery_card(args: &[String]) -> i32 {
+    let opts = match parse_card_options(args) {
+        Ok(o) => o,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    let Some(out) = &opts.out else {
+        eprintln!("Error: recovery-card needs --out <file>.");
+        return EXIT_USAGE;
+    };
+    let (Some(pc), Some(backup_model), Some(backup_serial)) =
+        (&opts.pc, &opts.backup_model, &opts.backup_serial)
+    else {
+        eprintln!("Error: recovery-card needs --pc <description>, --backup-model <model> and --backup-serial <last 4 of the serial>. A card that cannot identify the PC and its backup drive is worse than no card.");
+        return EXIT_USAGE;
+    };
+    let media = match (&opts.media_model, &opts.media_serial) {
+        (Some(model), Some(serial)) => Some(DriveIdentification {
+            model: model.clone(),
+            serial_suffix: serial.clone(),
+            label: opts.media_label.clone(),
+        }),
+        (None, None) => None,
+        _ => {
+            eprintln!(
+                "Error: --media-model and --media-serial must be given together (or neither)."
+            );
+            return EXIT_USAGE;
+        }
+    };
+
+    // Optional fact sources: a volume (last backup) and a Boot
+    // Rehearsal record (last rehearsal).
+    let mut last_backup = None;
+    if let Some(volume_dir) = &opts.volume {
+        let cred_opts = Options {
+            passphrase: opts.passphrase.clone(),
+            recovery_key_file: opts.recovery_key.clone(),
+            ..Options::default()
+        };
+        let unlocked = match unlock(&volume_dir.to_string_lossy(), &cred_opts) {
+            Ok(u) => u,
+            Err(e) => return report_error(&e),
+        };
+        let catalog = match safereturn_core::read_catalog(&unlocked) {
+            Ok(c) => c,
+            Err(e) => return report_error(&e),
+        };
+        let chosen = match &opts.set {
+            Some(id) => catalog.sets.iter().find(|s| &s.set_id == id),
+            None => catalog.sets.iter().max_by_key(|s| s.created_unix),
+        };
+        match chosen {
+            Some(entry) => {
+                last_backup = Some(LastBackupFact {
+                    label: entry.label.clone(),
+                    set_id: entry.set_id.clone(),
+                    created_unix: entry.created_unix,
+                    file_count: entry.files,
+                    total_bytes: entry.bytes,
+                })
+            }
+            None => {
+                eprintln!("Error: the volume has no matching backup set — a card claiming a last backup that does not exist would lie. Make a backup first, or omit --volume.");
+                return EXIT_FAIL;
+            }
+        }
+    }
+    let mut last_rehearsal = None;
+    if let Some(staging) = &opts.rehearsal_staging {
+        match read_rehearsal_record(staging) {
+            Ok(record) => {
+                let summary = match &record.vm_boot {
+                    VmBootStatus::Recorded { outcome, .. } => {
+                        format!(
+                            "files {} — VM boot recorded: {outcome}",
+                            if record.files_verified {
+                                "verified"
+                            } else {
+                                "DID NOT VERIFY"
+                            }
+                        )
+                    }
+                    VmBootStatus::NotBootTested => format!(
+                        "files {}; not boot-tested",
+                        if record.files_verified {
+                            "verified"
+                        } else {
+                            "DID NOT VERIFY"
+                        }
+                    ),
+                };
+                last_rehearsal = Some(LastRehearsalFact {
+                    level_label: "Level 3 — Boot Rehearsal".to_string(),
+                    unix: record.rehearsed_unix,
+                    summary,
+                });
+            }
+            Err(e) => return report_error(&e),
+        }
+    }
+
+    let facts = RecoveryCardFacts {
+        pc_description: pc.clone(),
+        backup_drive: DriveIdentification {
+            model: backup_model.clone(),
+            serial_suffix: backup_serial.clone(),
+            label: opts.backup_label.clone(),
+        },
+        media,
+        boot_menu_key: opts.boot_key.clone(),
+        password_hint_location: opts.hint_location.clone(),
+        last_backup,
+        last_rehearsal,
+        generated_unix: now_unix(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let format = opts.format.as_deref().unwrap_or_else(|| {
+        let name = out.to_string_lossy().to_lowercase();
+        if name.ends_with(".html") || name.ends_with(".htm") {
+            "html"
+        } else {
+            "text"
+        }
+    });
+    let rendered = match format {
+        "html" => render_card_html(&facts),
+        "text" => render_card_text(&facts),
+        other => {
+            eprintln!("Error: --format must be html or text, not '{other}'.");
+            return EXIT_USAGE;
+        }
+    };
+    let content = match rendered {
+        Ok(c) => c,
+        Err(e) => return report_error(&e),
+    };
+    match std::fs::write(out, content) {
+        Ok(()) => {
+            println!(
+                "Recovery Card written to {} ({})",
+                out.display(),
+                if format == "html" {
+                    "HTML — print it from a browser"
+                } else {
+                    "plain text"
+                }
+            );
+            println!(
+                "Print two copies: one with the backup drive, one somewhere safe at home. {NO_PASSWORD_LINE}"
+            );
+            EXIT_OK
+        }
+        Err(e) => report_error(&CoreError::Io {
+            path: Some(out.clone()),
+            source: e,
+        }),
+    }
+}
+
+fn parse_card_options(args: &[String]) -> std::result::Result<CardCliOptions, String> {
+    let mut opts = CardCliOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].clone();
+        let take = |i: &mut usize| -> std::result::Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("flag {arg} needs a value"))
+        };
+        match arg.as_str() {
+            "--out" => opts.out = Some(PathBuf::from(take(&mut i)?)),
+            "--format" => opts.format = Some(take(&mut i)?),
+            "--pc" => opts.pc = Some(take(&mut i)?),
+            "--backup-model" => opts.backup_model = Some(take(&mut i)?),
+            "--backup-serial" => opts.backup_serial = Some(take(&mut i)?),
+            "--backup-label" => opts.backup_label = Some(take(&mut i)?),
+            "--media-model" => opts.media_model = Some(take(&mut i)?),
+            "--media-serial" => opts.media_serial = Some(take(&mut i)?),
+            "--media-label" => opts.media_label = Some(take(&mut i)?),
+            "--boot-key" => opts.boot_key = Some(take(&mut i)?),
+            "--password-hint-location" => opts.hint_location = Some(take(&mut i)?),
+            "--volume" => opts.volume = Some(PathBuf::from(take(&mut i)?)),
+            "--set" => opts.set = Some(take(&mut i)?),
+            "--passphrase" => opts.passphrase = Some(take(&mut i)?),
+            "--recovery-key" => opts.recovery_key = Some(PathBuf::from(take(&mut i)?)),
+            "--rehearsal-staging" => opts.rehearsal_staging = Some(PathBuf::from(take(&mut i)?)),
+            other => return Err(format!("unknown recovery-card flag '{other}'")),
+        }
+        i += 1;
+    }
+    Ok(opts)
 }
 
 // ---------------------------------------------------------------------------
