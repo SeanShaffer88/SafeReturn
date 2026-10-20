@@ -18,8 +18,9 @@
 use safereturn_contract::{Event, JobOutcome, WireMessage};
 use safereturn_core::crypto::{format_recovery_key, parse_recovery_key};
 use safereturn_core::*;
+use safereturn_vss::SnapshotSession;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const EXIT_OK: i32 = 0;
 const EXIT_FAIL: i32 = 1;
@@ -35,6 +36,16 @@ struct Options {
     keep_sandbox: bool,
     sample: usize,
     files: Vec<String>,
+    /// `backup --snapshot <VOL>`: capture from a VSS snapshot of VOL.
+    snapshot: Option<String>,
+    /// `backup --allow-live`: explicitly permit falling back to a live
+    /// capture when the snapshot cannot be taken (loudly warned, and
+    /// the set is recorded as a live capture).
+    allow_live: bool,
+    /// `backup --system-facts <file>`: attach a gatherer's facts JSON.
+    system_facts: Option<PathBuf>,
+    /// `backup --esp-root <dir>`: fresh ESP listing for the facts.
+    esp_root: Option<PathBuf>,
 }
 
 fn main() {
@@ -82,7 +93,7 @@ fn print_usage() {
 
 Usage:
   safereturn init-volume <folder> [--recovery-key-out <file>]
-  safereturn backup <volume> <label> <folder-or-file>... 
+  safereturn backup <volume> <label> <folder-or-file>... [--snapshot <VOL>] [--allow-live] [--system-facts <file>] [--esp-root <dir>]
   safereturn list-sets <volume>
   safereturn verify <volume> <set-id>
   safereturn restore-set <volume> <set-id> <target-folder> [--yes]
@@ -92,6 +103,16 @@ Usage:
 Credentials (every command except init-volume):
   --passphrase <p>        passphrase (or set SAFERETURN_PASSPHRASE, or be prompted)
   --recovery-key <file>   open the volume with a saved recovery key file instead
+
+Snapshot backups (Windows, elevated): --snapshot C:\\ captures from a
+VSS snapshot of that volume, so every folder you list must be on it. If
+the snapshot cannot be taken, the backup STOPS and nothing is written —
+a live capture is substituted only when --allow-live is passed, with a
+loud warning, and the set is then recorded as a live capture.
+
+System facts: --system-facts <file> attaches a gatherer's facts JSON to
+the new set's manifest. With --esp-root <dir>, the facts' ESP listing
+is replaced by a fresh listing of <dir>.
 
 Other flags: --json (contract JSON events), --yes (confirm a restore plan
 that replaces files), --keep-sandbox (rehearse-file: keep the sandbox)."
@@ -126,6 +147,10 @@ fn parse_options(args: &[String]) -> std::result::Result<(Vec<String>, Options),
                     .parse()
                     .map_err(|_| format!("--sample needs a number, got '{v}'"))?;
             }
+            "--snapshot" => opts.snapshot = Some(take_value(&mut i)?),
+            "--system-facts" => opts.system_facts = Some(PathBuf::from(take_value(&mut i)?)),
+            "--esp-root" => opts.esp_root = Some(PathBuf::from(take_value(&mut i)?)),
+            "--allow-live" => opts.allow_live = true,
             "--json" => opts.json = true,
             "--yes" => opts.yes = true,
             "--keep-sandbox" => opts.keep_sandbox = true,
@@ -206,6 +231,12 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         }
         CoreError::SourceUnreadable { .. } => {
             "No backup set was saved. (Chunks already copied stay on the volume as reusable content; no partial set exists.)"
+        }
+        CoreError::CaptureRootOutsideVolume { .. } => {
+            "No backup set was saved. (Chunks already copied stay on the volume as reusable content; no partial set exists.)"
+        }
+        CoreError::InvalidSystemFacts { .. } | CoreError::SystemFactsAlreadyPresent { .. } => {
+            "The backup set itself is untouched — no facts were attached or changed."
         }
         _ => "Nothing was changed by this operation.",
     }
@@ -334,36 +365,161 @@ fn cmd_backup(pos: &[String], opts: &Options) -> i32 {
         Err(e) => return report_error(&e),
     };
     let roots: Vec<PathBuf> = pos[2..].iter().map(PathBuf::from).collect();
-    let mut engine = Engine::new(unlocked);
-    let mut sink = make_sink(opts.json);
-    match engine.start_backup(&pos[1], &roots, &mut sink) {
-        Ok(outcome) => {
-            if !opts.json {
-                let m = &outcome.manifest;
-                println!("Backup finished.");
-                println!("set_id: {}", m.set_id);
-                println!(
-                    "Files backed up: {} ({} bytes)",
-                    m.files.len(),
-                    m.total_bytes()
+
+    // Snapshot session (S3): taken before the engine runs and held for
+    // exactly the backup's duration. The honesty rule: if the snapshot
+    // cannot be taken, the backup stops and nothing is written — a
+    // live capture is substituted ONLY under an explicit --allow-live,
+    // with warnings, and the set is then recorded as a live capture.
+    let mut snapshot_session: Option<SnapshotSession> = None;
+    let mut mapped: Option<MappedSource> = None;
+    if let Some(volume) = &opts.snapshot {
+        match SnapshotSession::begin(volume) {
+            Ok(session) => {
+                let device = session.device_root().unwrap_or("(unknown device)");
+                eprintln!("Snapshot: capturing from a VSS snapshot of {volume} at {device}.");
+                eprintln!(
+                    "If reading the snapshot fails, the backup stops — a live capture is never substituted silently."
                 );
-                println!(
-                    "New chunks written: {}; already on the volume: {}",
-                    outcome.chunks_written, outcome.chunks_reused
-                );
-                if m.skipped.is_empty() {
-                    println!("Skipped: nothing");
+                mapped = Some(MappedSource::new(
+                    volume.clone(),
+                    PathBuf::from(device.to_string()),
+                ));
+                snapshot_session = Some(session);
+            }
+            Err(e) => {
+                if opts.allow_live {
+                    eprintln!("WARNING: the snapshot could not be taken: {e}");
+                    eprintln!(
+                        "WARNING: --allow-live was given, so this backup reads the LIVE disk instead. \
+                         Files that change or are locked during the backup may be captured inconsistently. \
+                         The set will be recorded as a live capture — it is NOT a snapshot backup."
+                    );
                 } else {
-                    println!("Skipped:");
-                    for s in &m.skipped {
-                        println!("  {} — {}", s.path, s.reason);
-                    }
+                    eprintln!("Error: {e}");
+                    eprintln!(
+                        "What was not changed: Nothing — no backup set was saved, and no live capture was substituted. \
+                         Run without --snapshot for a live backup, pass --allow-live to permit one here, \
+                         or fix the snapshot problem (snapshots need Windows, an elevated prompt, and the VSS service running)."
+                    );
+                    return EXIT_FAIL;
                 }
             }
-            EXIT_OK
         }
-        Err(e) => report_error(&e),
     }
+
+    let mut engine = Engine::new(unlocked);
+    let mut sink = make_sink(opts.json);
+    let backup_result = match &mapped {
+        Some(m) => engine.start_backup_with_source(&pos[1], &roots, m, &mut sink),
+        None => engine.start_backup(&pos[1], &roots, &mut sink),
+    };
+    let outcome = match backup_result {
+        Ok(o) => {
+            // Finish (BackupComplete + delete snapshot) only a backup
+            // that succeeded; a failed backup aborts its snapshot.
+            if let Some(session) = snapshot_session {
+                if let Err(e) = session.finish() {
+                    eprintln!(
+                        "Warning: backup set {} WAS saved, but the snapshot could not be cleaned up: {e}",
+                        o.manifest.set_id
+                    );
+                    eprintln!(
+                        "A leftover shadow copy may remain on the PC — check `vssadmin list shadows` and delete it there if it is listed."
+                    );
+                    print_backup_summary(&o, opts);
+                    return EXIT_FAIL;
+                }
+            }
+            o
+        }
+        Err(e) => {
+            if let Some(session) = snapshot_session {
+                let _ = session.abort();
+            }
+            return report_error(&e);
+        }
+    };
+
+    print_backup_summary(&outcome, opts);
+
+    // System facts (S3): attach the gatherer's facts to the new set.
+    if let Some(facts_path) = &opts.system_facts {
+        match attach_facts(&engine, &outcome.manifest.set_id, facts_path, opts) {
+            Ok(()) => {
+                if !opts.json {
+                    println!(
+                        "System facts attached to set {} (recorded in the set manifest).",
+                        outcome.manifest.set_id
+                    );
+                }
+            }
+            Err(e) => return report_error(&e),
+        }
+    }
+    EXIT_OK
+}
+
+fn print_backup_summary(outcome: &BackupOutcome, opts: &Options) {
+    if opts.json {
+        return;
+    }
+    let m = &outcome.manifest;
+    println!("Backup finished.");
+    println!("set_id: {}", m.set_id);
+    println!(
+        "Capture: {}",
+        match m.capture_mode {
+            CaptureMode::VssSnapshot => "VSS snapshot (one point in time)",
+            CaptureMode::Live => "live filesystem (files read as they were found)",
+        }
+    );
+    println!(
+        "Files backed up: {} ({} bytes)",
+        m.files.len(),
+        m.total_bytes()
+    );
+    println!(
+        "New chunks written: {}; already on the volume: {}",
+        outcome.chunks_written, outcome.chunks_reused
+    );
+    if m.skipped.is_empty() {
+        println!("Skipped: nothing");
+    } else {
+        println!("Skipped:");
+        for s in &m.skipped {
+            println!("  {} — {}", s.path, s.reason);
+        }
+    }
+}
+
+/// Load a system-facts JSON file and attach it to a set (S3). With
+/// `--esp-root`, the facts' ESP listing is first replaced by a fresh
+/// listing of that root (stated on stderr, never silently).
+fn attach_facts(
+    engine: &Engine,
+    set_id: &str,
+    facts_path: &Path,
+    opts: &Options,
+) -> std::result::Result<(), CoreError> {
+    let text = std::fs::read_to_string(facts_path).map_err(|e| CoreError::Io {
+        path: Some(facts_path.to_path_buf()),
+        source: e,
+    })?;
+    let mut facts = parse_system_facts(&text)?;
+    if let Some(esp_root) = &opts.esp_root {
+        eprintln!(
+            "ESP listing: taken fresh from {} (replaces the facts file's ESP entry).",
+            esp_root.display()
+        );
+        facts.esp_files = esp_fact(
+            esp_root,
+            format!("ESP root supplied with --esp-root: {}", esp_root.display()),
+        );
+        facts.validate()?;
+    }
+    attach_system_facts(engine.volume(), set_id, facts)?;
+    Ok(())
 }
 
 fn cmd_list_sets(pos: &[String], opts: &Options) -> i32 {

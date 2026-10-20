@@ -173,3 +173,169 @@ fn cli_end_to_end() {
     let _ = fs::remove_dir_all(&base);
     let _ = Path::new("safereturn-recovery-key.txt");
 }
+
+const FACTS_JSON: &str = r#"{
+  "format_version": 1,
+  "gathered_unix": 1700005000,
+  "boot_mode": { "value": "uefi", "source": "cli smoke test" },
+  "secure_boot": { "value": true, "source": "cli smoke test" },
+  "bitlocker": { "C:": { "value": "on", "source": "cli smoke test" } },
+  "esp_files": { "value": [], "source": "cli smoke test" },
+  "winre": { "value": { "present": true, "location": "C:\\Windows\\System32\\Recovery\\Winre.wim" }, "source": "cli smoke test" },
+  "bcd": { "included": false, "source": "cli smoke test", "not_included_reason": "smoke test does not capture BCD" }
+}"#;
+
+#[test]
+fn cli_system_facts_and_snapshot_flags() {
+    let base = tmp("s3");
+    let src = base.join("srcDir");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), b"alpha").unwrap();
+    let volume = base.join("volume");
+    let volume_s = volume.to_string_lossy().into_owned();
+    let key_s = base.join("key.txt").to_string_lossy().into_owned();
+    let out = run(&[
+        "init-volume",
+        &volume_s,
+        "--recovery-key-out",
+        &key_s,
+        "--passphrase",
+        "smoke-test-pw",
+    ]);
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+    let src_s = src.to_string_lossy().into_owned();
+
+    // --system-facts attaches the gatherer's JSON to the new set.
+    let facts_path = base.join("facts.json");
+    fs::write(&facts_path, FACTS_JSON).unwrap();
+    let facts_s = facts_path.to_string_lossy().into_owned();
+    let out = run_pw(&[
+        "backup",
+        &volume_s,
+        "with-facts",
+        &src_s,
+        "--system-facts",
+        &facts_s,
+    ]);
+    assert!(out.status.success(), "backup failed: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("System facts attached"),
+        "stdout: {}",
+        stdout(&out)
+    );
+    assert!(stdout(&out).contains("Capture: live filesystem"));
+
+    // With --esp-root, the ESP entry is listed fresh from that root.
+    let esp = base.join("esp");
+    fs::create_dir_all(esp.join("EFI/Boot")).unwrap();
+    fs::write(esp.join("EFI/Boot/bootx64.efi"), b"fallback").unwrap();
+    let esp_s = esp.to_string_lossy().into_owned();
+    let out = run_pw(&[
+        "backup",
+        &volume_s,
+        "with-esp",
+        &src_s,
+        "--system-facts",
+        &facts_s,
+        "--esp-root",
+        &esp_s,
+    ]);
+    assert!(out.status.success(), "backup failed: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("ESP listing: taken fresh"),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    // A damaged facts file fails loudly and the error is named.
+    let bad_path = base.join("bad-facts.json");
+    fs::write(&bad_path, "{not json").unwrap();
+    let bad_s = bad_path.to_string_lossy().into_owned();
+    let out = run_pw(&[
+        "backup",
+        &volume_s,
+        "bad-facts",
+        &src_s,
+        "--system-facts",
+        &bad_s,
+    ]);
+    assert!(!out.status.success(), "damaged facts file must fail");
+    assert!(
+        stderr(&out).contains("What was not changed:"),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// Off Windows, `--snapshot` must fail cleanly with NOTHING written —
+/// and `--allow-live` must turn it into an honestly-labelled live
+/// backup. (On Windows this test does not exist: CI must never attempt
+/// a real snapshot, and begin() there needs elevation + a real VSS.)
+#[cfg(not(windows))]
+#[test]
+fn cli_snapshot_flag_off_windows() {
+    let base = tmp("s3-snap");
+    let src = base.join("srcDir");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), b"alpha").unwrap();
+    let volume = base.join("volume");
+    let volume_s = volume.to_string_lossy().into_owned();
+    let key_s = base.join("key.txt").to_string_lossy().into_owned();
+    let out = run(&[
+        "init-volume",
+        &volume_s,
+        "--recovery-key-out",
+        &key_s,
+        "--passphrase",
+        "smoke-test-pw",
+    ]);
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+    let src_s = src.to_string_lossy().into_owned();
+
+    // The snapshot cannot be taken here → named error, nothing written.
+    let out = run_pw(&["backup", &volume_s, "snap", &src_s, "--snapshot", "C:\\"]);
+    assert!(!out.status.success(), "snapshot off Windows must fail");
+    assert!(
+        stderr(&out).contains("require Windows"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("no live capture was substituted"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    let out = run_pw(&["list-sets", &volume_s]);
+    assert!(
+        stdout(&out).contains("No backup sets"),
+        "stdout: {}",
+        stdout(&out)
+    );
+
+    // With --allow-live, the same request succeeds — loudly, and the
+    // set is recorded as what it is: a live capture.
+    let out = run_pw(&[
+        "backup",
+        &volume_s,
+        "snap",
+        &src_s,
+        "--snapshot",
+        "C:\\",
+        "--allow-live",
+    ]);
+    assert!(
+        out.status.success(),
+        "allow-live backup failed: {}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("WARNING"), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("Capture: live filesystem"),
+        "stdout: {}",
+        stdout(&out)
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}

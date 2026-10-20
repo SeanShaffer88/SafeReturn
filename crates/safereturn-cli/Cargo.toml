@@ -16,4 +16,7 @@ path = "src/main.rs"
 [dependencies]
 safereturn-core = { path = "../safereturn-core" }
 safereturn-contract = { path = "../safereturn-contract" }
+# Snapshot sessions for `backup --snapshot` (S3). The session type is
+# cross-platform: off Windows, begin() returns a clean typed error.
+safereturn-vss = { path = "../safereturn-vss" }
 serde_json = "1.0"
