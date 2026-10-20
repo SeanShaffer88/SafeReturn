@@ -83,3 +83,32 @@ This is a recommendation, not a fait accompli — the call is yours (§8.1 of th
 - Accessibility checklist (text scaling, tools, CI checks): https://learn.microsoft.com/en-us/windows/apps/design/accessibility/accessibility-checklist
 - egui accessibility (AccessKit, default in eframe): https://docs.rs/egui (feature flags) and lib.rs/crates/egui FAQ
 - Local evidence: InstallScope quality audit, `~/workspace/installscope-quality/quality-audit.md` (2026-10-20)
+
+---
+
+## Addendum 2026-10-20 — S0.5 compile verification via CI (repo: SeanShaffer88/SafeReturn)
+
+The repo + windows-latest CI SEAN chose as the next step closed the
+compile-verification gap in four runs:
+
+1. Run #1 FAILED at `cargo test` on Windows: LNK2019, 5 unresolved
+   `sr_vss_*` symbols — the Rust test binary linked before the helper
+   existed. FIX: win.rs now loads vss_helper.dll at RUNTIME
+   (LoadLibraryW/GetProcAddress, OnceLock-cached); nothing links the
+   helper, and a missing DLL is a clean runtime error.
+2. Run #2 FAILED one test: golden fixture compare — the file on disk
+   had CRLF (Windows checkout conversion), generated JSON has LF;
+   content otherwise identical. FIX: `.gitattributes` pins
+   `* text=auto eol=lf`; the golden test also normalizes CRLF on read.
+3. Run #3: tests green on Windows; failed compiling the helper itself —
+   ~30 errors inside vsbackup.h (VSS_COMPONENT_TYPE, IVssWMFiledesc,
+   VSS_USAGE_TYPE… all undefined). Root cause: those types live in
+   <vswriter.h>; Microsoft Learn's vsbackup.h requirements state
+   "include VsBackup.h, Vss.h, VsWriter.h". FIX: added the include.
+4. Run #4 GREEN (both jobs): fmt clean, all workspace tests pass
+   natively on windows-latest, and vss_helper.cpp compiles clean
+   against Windows SDK 10.0.26100 with VssApi.lib.
+
+STILL UNVERIFIED (unchanged): runtime behavior — the probe has not
+run elevated on a real Windows machine; no snapshot has been taken.
+That remains the S0.5 on-machine checklist in §1 above.

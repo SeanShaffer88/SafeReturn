@@ -11,9 +11,12 @@
 // VssApi.lib, behind a narrow C ABI that the Rust state machine drives.
 //
 // STATUS: written to Microsoft Learn's documented signatures/sequence.
-// Compile verification requires a Windows SDK machine (or windows-latest CI
-// runner) — NOT yet compile-verified as of 2026-10-20. First CI job for the
-// future repo: build this file. Do not ship product code from it until then.
+// COMPILE-VERIFIED 2026-10-20: GitHub Actions windows-latest (SDK
+// 10.0.26100, MSVC) builds this file clean — CI run #4 on
+// SeanShaffer88/SafeReturn, after adding the <vswriter.h> include that
+// Learn's vsbackup.h requirements call for. RUNTIME behavior is still
+// UNVERIFIED: the probe has not yet run elevated on a real Windows
+// machine (S0.5). Do not ship product code from it until then.
 //
 // Sequence (Learn: Requesters / Overview of Pre-Backup Tasks):
 //   CreateVssBackupComponents -> InitializeForBackup
