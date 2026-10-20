@@ -223,6 +223,29 @@ pub enum CoreError {
     SystemRestoreBootFilesMissing {
         detail: String,
     },
+    /// System-restore plan token is unknown, already used, or not a
+    /// token (S5, slice 2 — its own namespace, like media's).
+    SystemRestoreInvalidPlanToken,
+    /// The target disk changed after the system-restore plan was
+    /// made (size, removable flag, serial suffix, or firmware mode),
+    /// so executing would erase a disk other than the one confirmed
+    /// (S5).
+    SystemRestorePlanStale {
+        detail: String,
+    },
+    /// On Windows, a live system restore was asked for but the
+    /// explicit live-enable environment switch is not set. Erasing a
+    /// real disk never starts from an ambient call (S5).
+    SystemRestoreLiveNotEnabled {
+        env_var: &'static str,
+    },
+    /// The Windows disk executor is a skeleton: it renders the exact
+    /// diskpart script and boot commands a restore would run (and
+    /// saves them for inspection), but running them against a real
+    /// disk is on-machine work that has not been verified (S5).
+    SystemRestoreExecutorNotReady {
+        detail: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
@@ -270,6 +293,10 @@ impl CoreError {
             CoreError::SystemRestoreTargetTooSmall { .. } => "system_restore.target_too_small",
             CoreError::SystemRestoreInvalidFacts { .. } => "system_restore.invalid_facts",
             CoreError::SystemRestoreBootFilesMissing { .. } => "system_restore.boot_files_missing",
+            CoreError::SystemRestoreInvalidPlanToken => "system_restore.invalid_plan_token",
+            CoreError::SystemRestorePlanStale { .. } => "system_restore.plan_stale",
+            CoreError::SystemRestoreLiveNotEnabled { .. } => "system_restore.live_not_enabled",
+            CoreError::SystemRestoreExecutorNotReady { .. } => "system_restore.executor_not_ready",
         }
     }
 }
@@ -437,6 +464,22 @@ impl fmt::Display for CoreError {
             CoreError::SystemRestoreBootFilesMissing { detail } => write!(
                 f,
                 "the backup does not contain the files a PC needs to boot: {detail}. Restoring would produce a disk that cannot start, so the plan was refused. Nothing was changed. Re-capture the system backup including the EFI System Partition."
+            ),
+            CoreError::SystemRestoreInvalidPlanToken => write!(
+                f,
+                "that system restore plan is not valid (unknown or already used). Nothing was touched. Make a new system restore plan and confirm it before restoring."
+            ),
+            CoreError::SystemRestorePlanStale { detail } => write!(
+                f,
+                "the target disk changed after this restore plan was made ({detail}), so the plan no longer describes the disk that would be erased. Nothing was touched. Make a new system restore plan for the disk as it is now."
+            ),
+            CoreError::SystemRestoreLiveNotEnabled { env_var } => write!(
+                f,
+                "a live system restore erases a real disk and is not enabled: set the {env_var}=1 environment variable to permit it. Nothing was touched."
+            ),
+            CoreError::SystemRestoreExecutorNotReady { detail } => write!(
+                f,
+                "the real-disk restore executor is not ready to run: {detail}. Nothing was erased."
             ),
         }
     }

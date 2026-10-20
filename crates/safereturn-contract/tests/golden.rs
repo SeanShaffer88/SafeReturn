@@ -139,6 +139,44 @@ fn fixtures() -> Vec<(&'static str, WireMessage)> {
             })),
         ),
         (
+            "plan_system_restore",
+            WireMessage::Request {
+                id: 11,
+                body: Request::PlanSystemRestore {
+                    backup_id: "1700000100-first-a1b2c3d4".into(),
+                    target_disk_id: "disk-2".into(),
+                },
+            },
+        ),
+        (
+            "start_system_restore",
+            WireMessage::Request {
+                id: 12,
+                body: Request::StartSystemRestore {
+                    plan_token:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                },
+            },
+        ),
+        (
+            "system_restore_planned",
+            WireMessage::Event(Event::SystemRestorePlanned(SystemRestorePlan {
+                plan_token:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                backup_id: "1700000100-first-a1b2c3d4".into(),
+                target_disk_id: "disk-2".into(),
+                target_summary:
+                    "Seagate Backup Plus (…X7K2): 2.0 TB disk — 4 partitions (GPT, UEFI), 128 files, 240.0 GB to restore"
+                        .into(),
+                erase_warning_id: Some("system_restore.will_erase_target".into()),
+                firmware: "uefi".into(),
+                partition_count: 4,
+                file_count: 128,
+                total_bytes: 240_000_000_000,
+                warnings: vec!["system_restore.winre_missing".into()],
+            })),
+        ),
+        (
             "job_finished_failed",
             WireMessage::Event(Event::JobFinished {
                 job_id: "job-1".into(),

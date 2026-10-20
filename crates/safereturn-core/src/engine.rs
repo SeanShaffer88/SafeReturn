@@ -21,6 +21,14 @@
 //!   the plan to a `MediaExecutor`. Drift refuses with nothing
 //!   written — the device that would be erased must be the device
 //!   the user confirmed.
+//! - Whole-PC restore follows the same discipline a third time (S5):
+//!   `plan_system_restore` computes the GPT layout and returns a
+//!   token; `execute_system_restore` consumes it, re-checks the
+//!   target facts (size, removable, serial suffix, firmware mode),
+//!   and only then hands the plan to a `SystemRestoreExecutor`
+//!   (simulation, Windows skeleton, or unsupported). A simulated
+//!   run finishes under a different summary id than a real one —
+//!   the two are never conflated.
 //! - Level-2 File Rehearsal restores chosen files plus a deterministic
 //!   pseudo-random sample into a temporary sandbox and compares hashes;
 //!   the sample is reproducible (seeded from the set id), so a rehearsal
@@ -38,9 +46,15 @@ use crate::sets::{
     verify_set, BackupOutcome, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport,
     TargetState,
 };
+use crate::system_restore::{
+    plan_system_restore as compute_system_restore_plan, SystemRestoreOptions,
+    SystemRestorePlan as CoreSystemRestorePlan, SystemRestoreTargetFacts,
+};
+use crate::system_restore_exec::{SystemRestoreExecution, SystemRestoreExecutor};
 use crate::volume::UnlockedVolume;
 use safereturn_contract::{
     BackupSummary, Event, JobOutcome, MediaPlan as ContractMediaPlan, RestorePlan,
+    SystemRestorePlan as ContractSystemRestorePlan,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -85,11 +99,22 @@ struct MediaPlanState {
     target: MediaTargetFacts,
 }
 
+/// A system-restore plan awaiting StartSystemRestore: the computed
+/// plan plus the target facts as they were when the user saw the
+/// plan — the staleness reference. (Its own token namespace, like
+/// media's: a system-restore token never restores files or creates
+/// media, and vice versa.)
+struct SystemRestorePlanState {
+    plan: CoreSystemRestorePlan,
+    target: SystemRestoreTargetFacts,
+}
+
 pub struct Engine {
     volume: UnlockedVolume,
     job_counter: u64,
     plans: HashMap<String, PlanState>,
     media_plans: HashMap<String, MediaPlanState>,
+    system_restore_plans: HashMap<String, SystemRestorePlanState>,
 }
 
 impl Engine {
@@ -99,6 +124,7 @@ impl Engine {
             job_counter: 0,
             plans: HashMap::new(),
             media_plans: HashMap::new(),
+            system_restore_plans: HashMap::new(),
         }
     }
 
@@ -382,6 +408,7 @@ impl Engine {
     pub fn clear_plans(&mut self) {
         self.plans.clear();
         self.media_plans.clear();
+        self.system_restore_plans.clear();
     }
 
     // -- Recovery media (S4) ----------------------------------------------
@@ -500,6 +527,146 @@ impl Engine {
                     job_id,
                     outcome: JobOutcome::Failed,
                     summary_id: "result.media_failed".to_string(),
+                });
+                Err(e)
+            }
+        }
+    }
+
+    // -- Whole-PC (bare-metal) restore (S5) -------------------------------
+
+    /// PlanSystemRestore: compute the bare-metal restore plan for a
+    /// system set onto the target the facts describe. Erases
+    /// nothing; planning refusals (not a system set, firmware
+    /// problems, missing boot files, target too small) surface as
+    /// their named errors. On success, emits SystemRestorePlanned
+    /// with a single-use token bound to this exact plan.
+    pub fn plan_system_restore(
+        &mut self,
+        backup_id: &str,
+        target: &SystemRestoreTargetFacts,
+        options: &SystemRestoreOptions,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<ContractSystemRestorePlan> {
+        let manifest = read_set_manifest(&self.volume, backup_id)?;
+        let core_plan = compute_system_restore_plan(&manifest, target, options)?;
+        let token = new_plan_token()?;
+        let summary = ContractSystemRestorePlan {
+            plan_token: token.clone(),
+            backup_id: backup_id.to_string(),
+            target_disk_id: target.disk_id.clone(),
+            target_summary: format!(
+                "{} (…{}): {} disk — {} partitions (GPT, UEFI), {} files, {} to restore",
+                target.model,
+                target.serial_suffix,
+                format_bytes(target.size_bytes),
+                core_plan.layout.len(),
+                core_plan.total_file_count(),
+                format_bytes(core_plan.total_apply_bytes()),
+            ),
+            // A system restore always erases the target disk — the
+            // warning is part of every plan, not an edge case.
+            erase_warning_id: Some("system_restore.will_erase_target".to_string()),
+            firmware: "uefi".to_string(),
+            partition_count: core_plan.layout.len() as u64,
+            file_count: core_plan.total_file_count(),
+            total_bytes: core_plan.total_apply_bytes(),
+            warnings: core_plan
+                .warnings
+                .iter()
+                .map(|w| w.id().to_string())
+                .collect(),
+        };
+        self.system_restore_plans.insert(
+            token,
+            SystemRestorePlanState {
+                target: target.clone(),
+                plan: core_plan,
+            },
+        );
+        sink(Event::SystemRestorePlanned(summary.clone()));
+        Ok(summary)
+    }
+
+    /// StartSystemRestore: execute the plan bound to `plan_token`
+    /// through `executor`. The token is consumed either way. Before
+    /// the executor runs, the target facts are re-checked against
+    /// the plan: if the disk that would be erased is not the disk
+    /// the user confirmed (size, removable flag, serial suffix, or
+    /// firmware mode changed), the restore refuses with
+    /// SystemRestorePlanStale and the executor is never called —
+    /// nothing is touched. The executor's outcome distinguishes
+    /// simulated from real runs in the job summary id: a simulation
+    /// never reports as a completed real restore.
+    pub fn execute_system_restore(
+        &mut self,
+        plan_token: &str,
+        current_target: &SystemRestoreTargetFacts,
+        executor: &dyn SystemRestoreExecutor,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<SystemRestoreExecution> {
+        let state = self
+            .system_restore_plans
+            .remove(plan_token)
+            .ok_or(CoreError::SystemRestoreInvalidPlanToken)?;
+        let planned = &state.target;
+        let drift = if current_target.size_bytes != planned.size_bytes {
+            Some(format!(
+                "target size was {} bytes when planned, is {} bytes now",
+                planned.size_bytes, current_target.size_bytes
+            ))
+        } else if current_target.removable != planned.removable {
+            Some(format!(
+                "target removable flag was {} when planned, is {} now",
+                planned.removable, current_target.removable
+            ))
+        } else if current_target.serial_suffix != planned.serial_suffix {
+            Some(format!(
+                "target serial suffix was …{} when planned, is …{} now — a different disk may be attached",
+                planned.serial_suffix, current_target.serial_suffix
+            ))
+        } else if current_target.firmware.value != planned.firmware.value {
+            Some(
+                "the target PC's firmware mode changed after planning — the plan's boot steps no longer match this machine"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        if let Some(detail) = drift {
+            return Err(CoreError::SystemRestorePlanStale { detail });
+        }
+        let job_id = self.next_job_id();
+        sink(Event::JobStarted {
+            job_id: job_id.clone(),
+        });
+        let mut progress = |done: u64, total: u64| {
+            sink(Event::JobProgress {
+                job_id: job_id.clone(),
+                phase_id: "phase.restoring_system".to_string(),
+                done,
+                total,
+                unit: "files".to_string(),
+            });
+        };
+        match executor.execute(&self.volume, &state.plan, &mut progress) {
+            Ok(execution) => {
+                sink(Event::JobFinished {
+                    job_id,
+                    outcome: JobOutcome::Succeeded,
+                    summary_id: if execution.simulated {
+                        "result.system_restore_simulated".to_string()
+                    } else {
+                        "result.system_restore_completed".to_string()
+                    },
+                });
+                Ok(execution)
+            }
+            Err(e) => {
+                sink(Event::JobFinished {
+                    job_id,
+                    outcome: JobOutcome::Failed,
+                    summary_id: "result.system_restore_failed".to_string(),
                 });
                 Err(e)
             }

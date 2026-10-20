@@ -1,0 +1,16 @@
+{
+  "kind": "event",
+  "type": "system_restore_planned",
+  "plan_token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "backup_id": "1700000100-first-a1b2c3d4",
+  "target_disk_id": "disk-2",
+  "target_summary": "Seagate Backup Plus (…X7K2): 2.0 TB disk — 4 partitions (GPT, UEFI), 128 files, 240.0 GB to restore",
+  "erase_warning_id": "system_restore.will_erase_target",
+  "firmware": "uefi",
+  "partition_count": 4,
+  "file_count": 128,
+  "total_bytes": 240000000000,
+  "warnings": [
+    "system_restore.winre_missing"
+  ]
+}

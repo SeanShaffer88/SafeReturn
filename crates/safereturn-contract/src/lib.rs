@@ -80,6 +80,25 @@ pub enum Request {
     CreateMedia {
         plan_token: String,
     },
+    /// Ask the engine to plan a whole-PC (bare-metal) restore of a
+    /// system backup set onto a target disk (S5). Planning erases
+    /// nothing; the engine answers SystemRestorePlanned with the
+    /// layout summary, the warnings, and a plan token — or refuses
+    /// with a named error (not a system set, firmware mismatch,
+    /// target too small, boot files missing).
+    PlanSystemRestore {
+        backup_id: String,
+        target_disk_id: String,
+    },
+    /// Execute the system restore identified by `plan_token` — the
+    /// exact token from the SystemRestorePlanned event the user
+    /// confirmed. Executing ERASES the target disk. Tokens are
+    /// single-use; if the target disk changed after planning, the
+    /// engine refuses (system_restore.plan_stale) and touches
+    /// nothing.
+    StartSystemRestore {
+        plan_token: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +183,33 @@ pub struct MediaPlan {
     pub warnings: Vec<String>,
 }
 
+/// The engine's answer to PlanSystemRestore (S5): the restore the
+/// user is being asked to confirm, plus the token that binds
+/// StartSystemRestore to *this* preview. A system restore always
+/// erases the target disk, so `erase_warning_id` is always present —
+/// there is no system-restore plan without an erase warning.
+/// `warnings` carries the plan's disclosed gaps (e.g. WinRE missing,
+/// BitLocker not restored) as strings-table ids: the shell must show
+/// them before the confirm, not after the restore.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemRestorePlan {
+    pub plan_token: String,
+    pub backup_id: String,
+    pub target_disk_id: String,
+    /// Data summary (model, serial suffix, sizes) — rendered as data
+    /// like DiskInfo.model; flow wording is strings-table copy.
+    pub target_summary: String,
+    pub erase_warning_id: Option<String>,
+    /// "uefi" — the firmware mode the layout and boot steps are
+    /// built for (S5 plans are UEFI/GPT only; anything else was
+    /// refused at plan time, never represented here).
+    pub firmware: String,
+    pub partition_count: u64,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobOutcome {
@@ -191,6 +237,7 @@ pub enum Event {
     },
     RestorePlanned(RestorePlan),
     MediaPlanned(MediaPlan),
+    SystemRestorePlanned(SystemRestorePlan),
     JobStarted {
         job_id: String,
     },

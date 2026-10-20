@@ -1,0 +1,9 @@
+{
+  "kind": "request",
+  "id": 11,
+  "body": {
+    "type": "plan_system_restore",
+    "backup_id": "1700000100-first-a1b2c3d4",
+    "target_disk_id": "disk-2"
+  }
+}

@@ -43,6 +43,7 @@ pub mod plain;
 pub mod sets;
 pub mod system;
 pub mod system_restore;
+pub mod system_restore_exec;
 pub mod volume;
 
 pub use error::{ChunkCorruptReason, CoreError, Result};
@@ -92,5 +93,13 @@ pub use system_restore::{
     GPT_END_RESERVE_BYTES, GPT_FRONT_RESERVE_BYTES, MSR_BYTES, REQUIRED_ESP_BOOT_FILES,
     WINDOWS_HEADROOM_MIN_BYTES, WINRE_FREE_HEADROOM_BYTES, WINRE_GPT_ATTRIBUTES,
     WINRE_IMAGE_DEST_REL, WINRE_MIN_BYTES, WINRE_TYPE_GUID,
+};
+#[cfg(windows)]
+pub use system_restore_exec::WindowsDiskExecutor;
+pub use system_restore_exec::{
+    diskpart_script, platform_system_restore_executor, post_step_commands, RecordedPostStep,
+    RestoreLog, SimulatedDiskExecutor, SystemRestoreExecution, SystemRestoreExecutor,
+    UnsupportedSystemRestoreExecutor, DISKPART_SCRIPT_FILE, RESTORE_LIVE_ENV, RESTORE_LOG_FILE,
+    RESTORE_LOG_FORMAT_VERSION,
 };
 pub use volume::{sha256_hex, UnlockedVolume, Volume, VolumeHeader, VOLUME_FORMAT_VERSION};
