@@ -1,0 +1,8 @@
+{
+  "kind": "request",
+  "id": 8,
+  "body": {
+    "type": "start_restore",
+    "plan_token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}

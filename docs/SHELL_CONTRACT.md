@@ -57,6 +57,8 @@ CLI (Rust) ── same message types, text rendering ─────────
 
 Types for the rows above marked v1-core are in the crate now; restore/media rows land with their slices (S4/S5) under the same rules.
 
+**S2 update (2026-10-20):** the file-restore rows are implemented in `safereturn-contract` and pinned by golden fixtures (`plan_restore`, `start_restore`, `backup_list`, `restore_planned`). Details: `PlanRestore { backup_id, target_dir, path }` — `path: None` plans a whole-set restore into `target_dir`; `path: Some(p)` plans the single file `p`, restored into `target_dir` under its file name. `RestorePlan` carries `plan_token`, `target_summary` (data: counts/bytes/destination), `erase_warning_id` (present only when existing files would be replaced), `file_count`, `total_bytes`, `overwrite_count`. `ListBackups` → `BackupList { backups: [BackupSummary] }` (facts from set manifests). `StartFileRehearsal { backup_id, paths }` starts the Level-2 rehearsal job. Engine rules the shells rely on: plan tokens are **single-use**; a plan goes **stale** — and `StartRestore` refuses, writing nothing — if any target file's state (absent / identical / different) changed after the plan was made. Whole-disk restore plans (disk targets, SafeTarget checks) still land with S5; `BrowseBackup` and media rows land with their slices.
+
 ## 6. What each shell must still do itself (presentation only)
 
 - WinUI 3: NavigationView layout, Fluent styling, Mica, Store-grade accessibility verification (Accessibility Insights + Narrator pass per Learn checklist), MSIX packaging, window/DPI handling.

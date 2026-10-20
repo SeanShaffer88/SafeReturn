@@ -10,9 +10,12 @@
 //!   content-addressed chunk records (compress → encrypt → store).
 //! - `sets` — backup sets and their manifests, Level-1 verify, restore,
 //!   and the manifest-rebuildable catalog.
+//! - `engine` — the shell-contract-facing API: contract events, restore
+//!   plans with single-use plan tokens, Level-2 File Rehearsal.
 //! - `error` — named errors with stable machine codes and fix paths.
 
 pub mod crypto;
+pub mod engine;
 pub mod error;
 pub mod hex;
 pub mod plain;
@@ -26,6 +29,9 @@ pub use plain::{ChunkStore, FileEntry, Manifest, VerifyReport, CHUNK_SIZE};
 
 // Production store surface.
 pub use crypto::{KdfParams, VolumeKey, WrappedKey};
+pub use engine::{
+    format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry, FileRehearsalReport,
+};
 pub use sets::{
     backup_tree, list_set_ids, list_sets, plan_target_states, read_catalog, read_set_manifest,
     rebuild_catalog, restore_file, restore_files, restore_set, summarize, verify_set,

@@ -598,11 +598,26 @@ pub fn restore_files(
     allowed_overwrites: &HashSet<String>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<RestoreOutcome> {
-    let total = files.len() as u64;
+    let entries: Vec<(SetFileEntry, PathBuf)> = files
+        .iter()
+        .map(|f| (f.clone(), target_dir.join(&f.path)))
+        .collect();
+    restore_entries(volume, &entries, allowed_overwrites, progress)
+}
+
+/// Restore (entry, explicit destination) pairs. The overwrite policy is
+/// keyed by set path: a destination holding different content is only
+/// replaced when the entry's set path is in `allowed_overwrites`.
+pub fn restore_entries(
+    volume: &UnlockedVolume,
+    entries: &[(SetFileEntry, PathBuf)],
+    allowed_overwrites: &HashSet<String>,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<RestoreOutcome> {
+    let total = entries.len() as u64;
     let mut outcome = RestoreOutcome::default();
-    for (i, entry) in files.iter().enumerate() {
-        let dest = target_dir.join(&entry.path);
-        restore_one_file(volume, entry, &dest, allowed_overwrites, &mut outcome)?;
+    for (i, (entry, dest)) in entries.iter().enumerate() {
+        restore_one_file(volume, entry, dest, allowed_overwrites, &mut outcome)?;
         progress(i as u64 + 1, total);
     }
     Ok(outcome)

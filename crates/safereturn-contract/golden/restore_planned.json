@@ -1,0 +1,11 @@
+{
+  "kind": "event",
+  "type": "restore_planned",
+  "plan_token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "backup_id": "1700000100-first-a1b2c3d4",
+  "target_summary": "128 files (4.2 GB) to C:\\Users\\Sam\\Restored — 2 existing files will be replaced",
+  "erase_warning_id": "restore.will_overwrite_files",
+  "file_count": 128,
+  "total_bytes": 4200000000,
+  "overwrite_count": 2
+}

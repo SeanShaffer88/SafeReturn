@@ -41,6 +41,31 @@ pub enum Request {
     CancelJob {
         job_id: String,
     },
+    /// List the backup sets on the opened volume (S2).
+    ListBackups,
+    /// Ask the engine to plan a file restore (S2). With `path: None` the
+    /// plan covers the whole set into `target_dir`; with `path: Some(p)`
+    /// it covers the single file `p`, restored into `target_dir` under
+    /// its file name. The engine answers RestorePlanned with a plan
+    /// token; nothing is written by planning.
+    PlanRestore {
+        backup_id: String,
+        target_dir: String,
+        path: Option<String>,
+    },
+    /// Execute the restore plan identified by `plan_token` — the exact
+    /// token from the RestorePlanned event the user confirmed. Tokens
+    /// are single-use and go stale if the target changes (S2).
+    StartRestore {
+        plan_token: String,
+    },
+    /// Level-2 File Rehearsal (S2): restore the chosen files (plus an
+    /// engine-picked deterministic sample) into a sandbox and compare
+    /// them byte-for-byte against the set manifest.
+    StartFileRehearsal {
+        backup_id: String,
+        paths: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,6 +101,34 @@ pub struct BackupPlan {
     pub summary_line_ids: Vec<String>,
 }
 
+/// One backup set as listed for the user (S2). Facts only — counts and
+/// sizes from the set manifest, never a derived "health" figure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackupSummary {
+    pub backup_id: String,
+    pub label: String,
+    pub created_unix: u64,
+    pub file_count: u64,
+    pub total_bytes: u64,
+}
+
+/// The engine's answer to PlanRestore (S2): everything the user is being
+/// asked to confirm, plus the token that binds StartRestore to *this*
+/// preview. `target_summary` is data (paths and counts), like
+/// DiskInfo.model — the flow wording around it is strings-table copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestorePlan {
+    pub plan_token: String,
+    pub backup_id: String,
+    pub target_summary: String,
+    /// Strings-table id of the overwrite warning, present only when
+    /// existing files would be replaced.
+    pub erase_warning_id: Option<String>,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub overwrite_count: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobOutcome {
@@ -98,6 +151,10 @@ pub enum Event {
         disks: Vec<DiskInfo>,
     },
     BackupPlanned(BackupPlan),
+    BackupList {
+        backups: Vec<BackupSummary>,
+    },
+    RestorePlanned(RestorePlan),
     JobStarted {
         job_id: String,
     },

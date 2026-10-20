@@ -1,0 +1,13 @@
+{
+  "kind": "event",
+  "type": "backup_list",
+  "backups": [
+    {
+      "backup_id": "1700000100-first-a1b2c3d4",
+      "label": "First backup",
+      "created_unix": 1700000100,
+      "file_count": 128,
+      "total_bytes": 4200000000
+    }
+  ]
+}

@@ -56,6 +56,54 @@ fn fixtures() -> Vec<(&'static str, WireMessage)> {
             }),
         ),
         (
+            "plan_restore",
+            WireMessage::Request {
+                id: 7,
+                body: Request::PlanRestore {
+                    backup_id: "1700000100-first-a1b2c3d4".into(),
+                    target_dir: "C:\\Users\\Sam\\Restored".into(),
+                    path: None,
+                },
+            },
+        ),
+        (
+            "start_restore",
+            WireMessage::Request {
+                id: 8,
+                body: Request::StartRestore {
+                    plan_token:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                },
+            },
+        ),
+        (
+            "backup_list",
+            WireMessage::Event(Event::BackupList {
+                backups: vec![BackupSummary {
+                    backup_id: "1700000100-first-a1b2c3d4".into(),
+                    label: "First backup".into(),
+                    created_unix: 1700000100,
+                    file_count: 128,
+                    total_bytes: 4_200_000_000,
+                }],
+            }),
+        ),
+        (
+            "restore_planned",
+            WireMessage::Event(Event::RestorePlanned(RestorePlan {
+                plan_token:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                backup_id: "1700000100-first-a1b2c3d4".into(),
+                target_summary:
+                    "128 files (4.2 GB) to C:\\Users\\Sam\\Restored — 2 existing files will be replaced"
+                        .into(),
+                erase_warning_id: Some("restore.will_overwrite_files".into()),
+                file_count: 128,
+                total_bytes: 4_200_000_000,
+                overwrite_count: 2,
+            })),
+        ),
+        (
             "job_finished_failed",
             WireMessage::Event(Event::JobFinished {
                 job_id: "job-1".into(),

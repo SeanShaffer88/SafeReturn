@@ -1,0 +1,19 @@
+[package]
+name = "safereturn-cli"
+version = "0.1.0"
+edition = "2021"
+
+# The headless support/advanced CLI (plan §5 lists a CLI in the
+# architecture; SHELL_CONTRACT §3: the CLI renders the same contract
+# messages as text, or as identical JSON with --json). It is a separate
+# crate — not a bin inside safereturn-core — so the core library stays
+# free of argument parsing, stdio, and process-exit concerns, and the
+# future shells never link CLI code by accident.
+[[bin]]
+name = "safereturn"
+path = "src/main.rs"
+
+[dependencies]
+safereturn-core = { path = "../safereturn-core" }
+safereturn-contract = { path = "../safereturn-contract" }
+serde_json = "1.0"

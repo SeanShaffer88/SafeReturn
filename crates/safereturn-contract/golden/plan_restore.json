@@ -1,0 +1,10 @@
+{
+  "kind": "request",
+  "id": 7,
+  "body": {
+    "type": "plan_restore",
+    "backup_id": "1700000100-first-a1b2c3d4",
+    "target_dir": "C:\\Users\\Sam\\Restored",
+    "path": null
+  }
+}
