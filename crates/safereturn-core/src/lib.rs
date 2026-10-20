@@ -23,6 +23,10 @@
 //!   refusals), plus the media manifest, verification, and the
 //!   boot-test marker protocol. Execution lives in `media_exec`
 //!   (Windows-only) behind the engine's plan-token flow.
+//! - `system_restore` — bare-metal restore planning (S5): the pure,
+//!   computed whole-PC restore plan (GPT layout with sourced
+//!   defaults, per-partition file application, bcdboot/reagentc
+//!   post steps as data, typed refusals).
 //! - `engine` — the shell-contract-facing API: contract events, restore
 //!   plans with single-use plan tokens, Level-2 File Rehearsal.
 //! - `error` — named errors with stable machine codes and fix paths.
@@ -38,6 +42,7 @@ pub mod media_verify;
 pub mod plain;
 pub mod sets;
 pub mod system;
+pub mod system_restore;
 pub mod volume;
 
 pub use error::{ChunkCorruptReason, CoreError, Result};
@@ -79,5 +84,13 @@ pub use system::{
     esp_fact, list_esp_files, parse_system_facts, BcdCapture, BitLockerState, BootMode, EspFile,
     Fact, StaticFactsGatherer, SystemFacts, SystemFactsGatherer, UnavailableGatherer, WinReInfo,
     SYSTEM_FACTS_FORMAT_VERSION,
+};
+pub use system_restore::{
+    plan_system_restore, ApplyFileStep, PartitionFilesystem, PartitionRole, PartitionSpec,
+    SystemRestoreOptions, SystemRestorePlan, SystemRestorePostStep, SystemRestoreTargetFacts,
+    SystemRestoreWarning, ESP_CONTENT_HEADROOM_BYTES, ESP_DEFAULT_BYTES, ESP_TYPE_GUID,
+    GPT_END_RESERVE_BYTES, GPT_FRONT_RESERVE_BYTES, MSR_BYTES, REQUIRED_ESP_BOOT_FILES,
+    WINDOWS_HEADROOM_MIN_BYTES, WINRE_FREE_HEADROOM_BYTES, WINRE_GPT_ATTRIBUTES,
+    WINRE_IMAGE_DEST_REL, WINRE_MIN_BYTES, WINRE_TYPE_GUID,
 };
 pub use volume::{sha256_hex, UnlockedVolume, Volume, VolumeHeader, VOLUME_FORMAT_VERSION};

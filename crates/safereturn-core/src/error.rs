@@ -181,6 +181,48 @@ pub enum CoreError {
     LiveNotEnabled {
         env_var: &'static str,
     },
+    /// A whole-PC (bare-metal) restore was planned from a set that has
+    /// no system facts section — a plain file set. File sets restore
+    /// files; they cannot rebuild a bootable PC (S5).
+    SystemRestoreNotASystemSet {
+        set_id: String,
+    },
+    /// The source PC's firmware mode is one this build's bare-metal
+    /// restore does not handle (BIOS/MBR; S5 is UEFI/GPT). Refused,
+    /// never silently converted (S5).
+    SystemRestoreFirmwareUnsupported {
+        detail: String,
+    },
+    /// The firmware mode of the source PC — or of the machine that
+    /// would boot the restored disk — could not be determined. A boot
+    /// plan is never built on a guessed firmware mode (S5).
+    SystemRestoreFirmwareUnknown {
+        detail: String,
+    },
+    /// Source and target firmware modes differ (UEFI vs BIOS). A
+    /// restore is never silently converted across firmware modes (S5).
+    SystemRestoreFirmwareMismatch {
+        detail: String,
+    },
+    /// The target disk is smaller than the computed minimum the
+    /// layout plus the set's data require (S5).
+    SystemRestoreTargetTooSmall {
+        needed_bytes: u64,
+        size_bytes: u64,
+    },
+    /// Facts or mapping inputs for a system-restore plan failed
+    /// validation (serial suffix, named roots, unmapped content) —
+    /// planning refuses rather than guessing (S5).
+    SystemRestoreInvalidFacts {
+        reason: String,
+    },
+    /// The set's captured ESP content lacks files a UEFI boot needs
+    /// (or the set has no ESP content at all), so the restored disk
+    /// could not boot. Refused at plan time, never discovered after
+    /// the target was erased (S5).
+    SystemRestoreBootFilesMissing {
+        detail: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
@@ -219,6 +261,15 @@ impl CoreError {
             CoreError::MediaManifestInvalid { .. } => "media.manifest_invalid",
             CoreError::UnsupportedPlatform { .. } => "core.unsupported_platform",
             CoreError::LiveNotEnabled { .. } => "media.live_not_enabled",
+            CoreError::SystemRestoreNotASystemSet { .. } => "system_restore.not_a_system_set",
+            CoreError::SystemRestoreFirmwareUnsupported { .. } => {
+                "system_restore.firmware_unsupported"
+            }
+            CoreError::SystemRestoreFirmwareUnknown { .. } => "system_restore.firmware_unknown",
+            CoreError::SystemRestoreFirmwareMismatch { .. } => "system_restore.firmware_mismatch",
+            CoreError::SystemRestoreTargetTooSmall { .. } => "system_restore.target_too_small",
+            CoreError::SystemRestoreInvalidFacts { .. } => "system_restore.invalid_facts",
+            CoreError::SystemRestoreBootFilesMissing { .. } => "system_restore.boot_files_missing",
         }
     }
 }
@@ -355,6 +406,37 @@ impl fmt::Display for CoreError {
             CoreError::LiveNotEnabled { env_var } => write!(
                 f,
                 "live media creation is a real hardware operation and is not enabled: set the {env_var}=1 environment variable to permit it. Nothing was written to any device."
+            ),
+            CoreError::SystemRestoreNotASystemSet { set_id } => write!(
+                f,
+                "backup set {set_id} has no system information recorded, so it cannot rebuild a whole PC — it is a file backup, not a system backup. Nothing was changed. Use a set that was captured as a system backup (with system facts), or restore individual files from this set instead."
+            ),
+            CoreError::SystemRestoreFirmwareUnsupported { detail } => write!(
+                f,
+                "this PC cannot be restored by SafeReturn's whole-PC restore: {detail}. Nothing was changed."
+            ),
+            CoreError::SystemRestoreFirmwareUnknown { detail } => write!(
+                f,
+                "SafeReturn could not determine the firmware mode needed to plan a bootable restore: {detail}. A boot plan is never built on a guess. Nothing was changed."
+            ),
+            CoreError::SystemRestoreFirmwareMismatch { detail } => write!(
+                f,
+                "the target PC's firmware mode does not match the backup: {detail}. SafeReturn does not convert a restore between UEFI and BIOS — the restored disk would not boot. Nothing was changed."
+            ),
+            CoreError::SystemRestoreTargetTooSmall {
+                needed_bytes,
+                size_bytes,
+            } => write!(
+                f,
+                "the target disk is too small for this restore: the layout and the backup's data need at least {needed_bytes} bytes, and the target has {size_bytes} bytes. Nothing was changed. Use a larger target disk."
+            ),
+            CoreError::SystemRestoreInvalidFacts { reason } => write!(
+                f,
+                "the system restore cannot be planned from these facts: {reason}. Nothing was changed. Fix the facts and plan again."
+            ),
+            CoreError::SystemRestoreBootFilesMissing { detail } => write!(
+                f,
+                "the backup does not contain the files a PC needs to boot: {detail}. Restoring would produce a disk that cannot start, so the plan was refused. Nothing was changed. Re-capture the system backup including the EFI System Partition."
             ),
         }
     }
