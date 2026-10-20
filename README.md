@@ -78,7 +78,7 @@ today:
   app, the Win32 recovery shell for WinPE, and the CLI
   (`safereturn-contract`, with golden JSON fixtures).
 
-License: GPL-2.0 (see `LICENSE`).
+License: MIT (see `LICENSE`).
 
 ## Layout
 
