@@ -31,8 +31,9 @@ facts — last backup time, which rehearsals passed and when — and says
 ## Status
 
 **Pre-alpha.** Architecture, the riskiest technical spike (S0), the
-S1/S2 engine, the S3 capture layer, and the S4 recovery-media
-builder are done; there is no installable product yet. What exists
+S1/S2 engine, the S3 capture layer, the S4 recovery-media
+builder, and the S5 bare-metal restore are done; there is no
+installable product yet. What exists
 today:
 
 - A production encrypted chunk store (`safereturn-core`): content-addressed
@@ -62,14 +63,35 @@ today:
   limit: no media has ever been built by this code — execution is
   compile-verified only, with the on-machine checklist in those
   notes.
+- The S5 bare-metal (whole-PC) restore: a pure, fully tested
+  **system-restore plan** (GPT layout — ESP/MSR/Windows/WinRE — with
+  every size computed and every default carrying its Microsoft Learn
+  source, per-partition file application, and the bcdboot/reagentc
+  boot steps as data), typed refusals (a file-only set, BIOS source,
+  firmware mismatch, missing boot files, target too small — all
+  named, before anything is erased), disclosed gaps (missing WinRE,
+  and the BitLocker rule: **a restored disk is not encrypted**, said
+  in the plan whenever the source was protected), contract messages
+  + the engine's third plan-token namespace, a **simulation
+  executor** that runs the full flow against a folder-backed fake
+  disk on any OS, and verification that separates "files in place"
+  from "boot registered" (the latter is never claimed from file
+  inspection). See `docs/S5_NOTES.md`. Honest limit: no real disk
+  has ever been restored by this code — the Windows executor is a
+  gated skeleton that renders the exact diskpart script and boot
+  commands and refuses to run them; the on-machine restore session
+  is listed precisely in those notes.
 - An engine API over the shell contract with restore **plan tokens**:
   a restore executes only the exact preview that was confirmed, refuses
   stale plans, and writes nothing on refusal. Plus Level-2 File
   Rehearsal (sandbox restore + byte-compare).
 - A headless CLI (`safereturn-cli`): `init-volume`, `backup` (with
   `--snapshot <VOL>` and `--system-facts <file>`), `list-sets`,
-  `verify`, `restore-set`, `restore-file`, `rehearse-file`, and
-  `media plan` / `media create` / `media verify`.
+  `verify`, `restore-set`, `restore-file`, `rehearse-file`,
+  `media plan` / `media create` / `media verify`, and
+  `restore-system plan` / `restore-system execute` (with
+  `--simulate <folder>`, the documented test path) /
+  `restore-system verify`.
 - A VSS requester spike: the documented Windows Volume Shadow Copy sequence
   as a tested state machine, plus a narrow C++ helper that talks to the real
   VSS API (`safereturn-vss`). Compiling that helper on Windows is verified by
@@ -94,6 +116,7 @@ docs/
   S1_S2_NOTES.md
   S3_NOTES.md
   S4_NOTES.md
+  S5_NOTES.md
   SHELL_CONTRACT.md
 ```
 
