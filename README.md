@@ -30,9 +30,9 @@ facts — last backup time, which rehearsals passed and when — and says
 
 ## Status
 
-**Pre-alpha.** Architecture, the riskiest technical spike (S0), and the
-S1/S2 engine are done; there is no installable product yet. What exists
-today:
+**Pre-alpha.** Architecture, the riskiest technical spike (S0), the
+S1/S2 engine, and the S3 capture layer are done; there is no
+installable product yet. What exists today:
 
 - A production encrypted chunk store (`safereturn-core`): content-addressed
   chunks (SHA-256 of the plaintext, dedupe), compressed and encrypted
@@ -40,13 +40,21 @@ today:
   passphrase or a recovery-key file, multi-folder backup sets with
   manifests stored on the volume, Level-1 verify that names damaged
   chunks, and a catalog that rebuilds from the manifests alone. See
-  `docs/S1_S2_NOTES.md` — including the honest list of what is *not* done
-  (no VSS snapshot wiring yet; that is S3).
+  `docs/S1_S2_NOTES.md`.
+- The S3 capture layer: backups read through a **capture source** — the
+  live filesystem by default, or a VSS snapshot via a prefix-mapped
+  source — and every set manifest records which (`capture_mode`), plus
+  an optional system-facts section (boot mode, Secure Boot, BitLocker,
+  ESP contents, WinRE, BCD status — each fact sourced, each unknown
+  explicit and reasoned). See `docs/S3_NOTES.md`. Honest limit: this
+  code has never taken a real snapshot — VSS runtime verification is
+  the pending S0.5 on-machine session, listed precisely in those notes.
 - An engine API over the shell contract with restore **plan tokens**:
   a restore executes only the exact preview that was confirmed, refuses
   stale plans, and writes nothing on refusal. Plus Level-2 File
   Rehearsal (sandbox restore + byte-compare).
-- A headless CLI (`safereturn-cli`): `init-volume`, `backup`, `list-sets`,
+- A headless CLI (`safereturn-cli`): `init-volume`, `backup` (with
+  `--snapshot <VOL>` and `--system-facts <file>`), `list-sets`,
   `verify`, `restore-set`, `restore-file`, `rehearse-file`.
 - A VSS requester spike: the documented Windows Volume Shadow Copy sequence
   as a tested state machine, plus a narrow C++ helper that talks to the real
@@ -70,6 +78,7 @@ docs/
   ARCHITECTURE_AND_UX_PLAN.md
   S0_FINDINGS.md
   S1_S2_NOTES.md
+  S3_NOTES.md
   SHELL_CONTRACT.md
 ```
 
