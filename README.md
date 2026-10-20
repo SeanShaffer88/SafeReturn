@@ -30,12 +30,24 @@ facts — last backup time, which rehearsals passed and when — and says
 
 ## Status
 
-**Pre-alpha.** Architecture and the riskiest technical spike (S0) are done;
-there is no installable product yet. What exists today:
+**Pre-alpha.** Architecture, the riskiest technical spike (S0), and the
+S1/S2 engine are done; there is no installable product yet. What exists
+today:
 
-- A content-addressed chunk store (SHA-256) with manifests, file restore, and
-  a verification pass that detects corruption (`safereturn-core`, with tests,
-  including a test that proves corrupted chunks are caught).
+- A production encrypted chunk store (`safereturn-core`): content-addressed
+  chunks (SHA-256 of the plaintext, dedupe), compressed and encrypted
+  per-chunk (XChaCha20-Poly1305), volumes unlocked by an Argon2id
+  passphrase or a recovery-key file, multi-folder backup sets with
+  manifests stored on the volume, Level-1 verify that names damaged
+  chunks, and a catalog that rebuilds from the manifests alone. See
+  `docs/S1_S2_NOTES.md` — including the honest list of what is *not* done
+  (no VSS snapshot wiring yet; that is S3).
+- An engine API over the shell contract with restore **plan tokens**:
+  a restore executes only the exact preview that was confirmed, refuses
+  stale plans, and writes nothing on refusal. Plus Level-2 File
+  Rehearsal (sandbox restore + byte-compare).
+- A headless CLI (`safereturn-cli`): `init-volume`, `backup`, `list-sets`,
+  `verify`, `restore-set`, `restore-file`, `rehearse-file`.
 - A VSS requester spike: the documented Windows Volume Shadow Copy sequence
   as a tested state machine, plus a narrow C++ helper that talks to the real
   VSS API (`safereturn-vss`). Compiling that helper on Windows is verified by
@@ -51,11 +63,13 @@ License: GPL-2.0 (see `LICENSE`).
 ```text
 crates/
   safereturn-contract/   Message types between shells and engine (+ golden fixtures)
-  safereturn-core/       Chunk store, manifests, verify, file restore
+  safereturn-core/       Encrypted chunk store, sets, verify, engine API, rehearsals
+  safereturn-cli/        Headless CLI (init-volume, backup, verify, restore, rehearse)
   safereturn-vss/        VSS requester state machine + C++ helper (cpp/)
 docs/
   ARCHITECTURE_AND_UX_PLAN.md
   S0_FINDINGS.md
+  S1_S2_NOTES.md
   SHELL_CONTRACT.md
 ```
 
