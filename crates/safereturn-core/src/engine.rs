@@ -19,10 +19,12 @@
 //!   the sample is reproducible (seeded from the set id), so a rehearsal
 //!   result can be re-run and compared.
 
+use crate::capture::{CaptureSource, LiveSource};
 use crate::error::{CoreError, Result};
 use crate::sets::{
-    backup_tree, hash_existing_file, list_sets, read_set_manifest, restore_entries, verify_set,
-    BackupOutcome, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport, TargetState,
+    backup_tree_with_source, hash_existing_file, list_sets, read_set_manifest, restore_entries,
+    verify_set, BackupOutcome, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport,
+    TargetState,
 };
 use crate::volume::UnlockedVolume;
 use safereturn_contract::{BackupSummary, Event, JobOutcome, RestorePlan};
@@ -110,13 +112,30 @@ impl Engine {
 
     // -- Backup ---------------------------------------------------------
 
-    /// StartBackup job: back up `roots` as a new set labelled `label`.
-    /// On failure a JobFinished(Failed) event is emitted and the error is
-    /// returned (the CLI/shell renders the error itself).
+    /// StartBackup job: back up `roots` as a new set labelled `label`,
+    /// reading from the live filesystem. On failure a
+    /// JobFinished(Failed) event is emitted and the error is returned
+    /// (the CLI/shell renders the error itself).
     pub fn start_backup(
         &mut self,
         label: &str,
         roots: &[PathBuf],
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<BackupOutcome> {
+        self.start_backup_with_source(label, roots, &LiveSource, sink)
+    }
+
+    /// StartBackup job reading through a capture source (S3) — e.g. a
+    /// `MappedSource` over a VSS snapshot's device root. `roots` are
+    /// logical paths; the source resolves what to open, and the set
+    /// manifest records the source's capture mode. The snapshot's life
+    /// cycle (begin/finish/abort) belongs to the caller: this method
+    /// only reads while the caller's session is alive.
+    pub fn start_backup_with_source(
+        &mut self,
+        label: &str,
+        roots: &[PathBuf],
+        source: &dyn CaptureSource,
         sink: &mut dyn FnMut(Event),
     ) -> Result<BackupOutcome> {
         let job_id = self.next_job_id();
@@ -133,7 +152,7 @@ impl Engine {
                 unit: "files".to_string(),
             });
         };
-        match backup_tree(volume, label, roots, now_unix(), &mut progress) {
+        match backup_tree_with_source(volume, source, label, roots, now_unix(), &mut progress) {
             Ok(outcome) => {
                 // The catalog is a rebuildable cache over the manifests;
                 // refresh it, but its failure must not misreport a backup

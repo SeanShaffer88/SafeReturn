@@ -270,5 +270,8 @@ pub fn snapshot_path(volume: &str, snapshot_device: &str, file_on_volume: &str) 
     ))
 }
 
+pub mod session;
+pub use session::{SnapshotError, SnapshotSession};
+
 #[cfg(windows)]
 pub mod win;

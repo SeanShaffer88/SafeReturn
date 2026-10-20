@@ -245,6 +245,40 @@ fn pre_s3_manifests_read_as_live_captures() {
 }
 
 #[test]
+fn engine_backup_with_mapped_source_emits_job_and_records_mode() {
+    use safereturn_contract::{Event, JobOutcome};
+    let base = tmp("engine-mapped");
+    let snap_root = base.join("snap-device");
+    make_content(&snap_root);
+    let volume = open_test_volume(&base, "vol");
+    let mut engine = Engine::new(volume);
+    let mapped = MappedSource::new("C:", snap_root);
+    let mut events: Vec<Event> = Vec::new();
+    let outcome = engine
+        .start_backup_with_source(
+            "engine-snap",
+            &[PathBuf::from("C:\\Docs")],
+            &mapped,
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+    assert_eq!(outcome.manifest.capture_mode, CaptureMode::VssSnapshot);
+    assert!(matches!(events.first(), Some(Event::JobStarted { .. })));
+    assert!(matches!(
+        events.last(),
+        Some(Event::JobFinished {
+            outcome: JobOutcome::Succeeded,
+            ..
+        })
+    ));
+    // The engine's set, read back through the engine's volume, agrees.
+    let stored = read_set_manifest(engine.volume(), &outcome.manifest.set_id).unwrap();
+    assert_eq!(stored.capture_mode, CaptureMode::VssSnapshot);
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
 fn mapped_source_resolves_volume_root_and_forward_slashes() {
     let base = tmp("mapped-resolve");
     let snap_root = base.join("dev");
