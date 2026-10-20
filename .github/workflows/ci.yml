@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    name: Windows (tests + VSS helper compile)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      # The explicit purpose of this job: prove the VSS requester helper
+      # compiles against the real Windows SDK vsbackup.h (the Rust
+      # `windows` crate does not expose IVssBackupComponents).
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compile VSS helper (vss_helper.cpp)
+        shell: cmd
+        run: cl /nologo /LD /EHsc crates\safereturn-vss\cpp\vss_helper.cpp /link VssApi.lib Ole32.lib /OUT:vss_helper.dll
+
+  linux:
+    name: Linux (fmt + tests + windows-target check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable, windows target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: x86_64-pc-windows-msvc
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Windows-target check
+        run: cargo check --workspace --target x86_64-pc-windows-msvc
