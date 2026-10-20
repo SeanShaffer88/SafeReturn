@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 const GIB: u64 = 1024 * 1024 * 1024;
-const MIB: u64 = 1024 * 1024;
 
 fn tmp_base(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);

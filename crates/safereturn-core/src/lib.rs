@@ -44,6 +44,7 @@ pub mod sets;
 pub mod system;
 pub mod system_restore;
 pub mod system_restore_exec;
+pub mod system_restore_verify;
 pub mod volume;
 
 pub use error::{ChunkCorruptReason, CoreError, Result};
@@ -101,5 +102,8 @@ pub use system_restore_exec::{
     RestoreLog, SimulatedDiskExecutor, SystemRestoreExecution, SystemRestoreExecutor,
     UnsupportedSystemRestoreExecutor, DISKPART_SCRIPT_FILE, RESTORE_LIVE_ENV, RESTORE_LOG_FILE,
     RESTORE_LOG_FORMAT_VERSION,
+};
+pub use system_restore_verify::{
+    verify_system_restore, EspBootFileCheck, PartitionVerify, SystemRestoreVerifyReport,
 };
 pub use volume::{sha256_hex, UnlockedVolume, Volume, VolumeHeader, VOLUME_FORMAT_VERSION};
