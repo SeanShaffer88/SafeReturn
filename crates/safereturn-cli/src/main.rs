@@ -67,6 +67,11 @@ fn run() -> i32 {
     if cmd == "media" {
         return run_media(&args[1..]);
     }
+    // `restore-system` is a subcommand group with its own flags
+    // (S5); same treatment.
+    if cmd == "restore-system" {
+        return run_restore_system(&args[1..]);
+    }
     let (pos, opts) = match parse_options(&args[1..]) {
         Ok(v) => v,
         Err(msg) => {
@@ -107,6 +112,9 @@ Usage:
   safereturn media plan --target-size <bytes> --serial-suffix <last4> --winpe-wim <file> [--removable] [--override-non-removable] [--payload <file>=<media/path>]... [--driver <inf>]...
   safereturn media create --plan-token <id from media plan> <same target/winpe flags as the plan> [--target-spec <F:>]
   safereturn media verify <media-root> [--data-root <ntfs-partition-root>]
+  safereturn restore-system plan <volume> <set-id> --target-size <bytes> --serial-suffix <last4> --os-root <set root> --esp-root <set root> --firmware <uefi|bios> [--target-model <model>] [--removable] [--plan-out <file>]
+  safereturn restore-system execute <volume> <set-id> --plan-token <id from restore-system plan> <same target flags as the plan> (--simulate <folder> | [--disk-index <n>] [--work-dir <folder>])
+  safereturn restore-system verify <applied-root> --plan <plan file from restore-system plan --plan-out>
 
 Credentials (every command except init-volume):
   --passphrase <p>        passphrase (or set SAFERETURN_PASSPHRASE, or be prompted)
@@ -132,6 +140,27 @@ creation is Windows-only and additionally requires SR_MEDIA_LIVE=1.
 `media verify` checks built media anywhere: payload hashes, boot
 files, and the boot-test marker (fresh media honestly reports
 NOT TESTED YET).
+
+Whole-PC restore (S5): `restore-system plan` computes the GPT layout
+for restoring a system set onto a target disk from the facts you pass
+(disk size, serial suffix, firmware mode, and which of the set's
+recorded roots is the OS volume and which is the ESP capture) and
+prints the full plan — layout with the source of every size, file
+counts, warnings, and the exact boot commands it would run — plus its
+plan id. Planning touches nothing. `restore-system execute`
+recomputes the plan from the same flags and only proceeds when
+--plan-token matches that plan id exactly; it prints the plan and the
+erase warning first. Executing ERASES the target disk. With
+--simulate <folder> it applies the plan to a folder-backed fake disk
+instead — the documented test path, works on any OS — and verifies
+the result. Real execution is Windows-only and gated
+(SR_RESTORE_LIVE=1); this build's Windows executor renders the
+diskpart script and command lines for inspection and refuses to run
+them (see docs/S5_NOTES.md). `restore-system verify` re-checks an
+applied tree (e.g. a simulation folder) against a saved plan file:
+files in place, boot files present, WinRE present — and boot
+registration reported NOT VERIFIED, because file inspection cannot
+prove it.
 
 Other flags: --json (contract JSON events), --yes (confirm a restore plan
 that replaces files), --keep-sandbox (rehearse-file: keep the sandbox)."
@@ -268,6 +297,21 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         | CoreError::LiveNotEnabled { .. } => {
             "Nothing was written to any device — no media was created or erased."
         }
+        CoreError::SystemRestoreNotASystemSet { .. }
+        | CoreError::SystemRestoreFirmwareUnsupported { .. }
+        | CoreError::SystemRestoreFirmwareUnknown { .. }
+        | CoreError::SystemRestoreFirmwareMismatch { .. }
+        | CoreError::SystemRestoreTargetTooSmall { .. }
+        | CoreError::SystemRestoreInvalidFacts { .. }
+        | CoreError::SystemRestoreBootFilesMissing { .. }
+        | CoreError::SystemRestoreInvalidPlanToken
+        | CoreError::SystemRestorePlanStale { .. }
+        | CoreError::SystemRestoreLiveNotEnabled { .. } => {
+            "Nothing was touched — no disk was erased, partitioned, or written."
+        }
+        CoreError::SystemRestoreExecutorNotReady { .. } => {
+            "Nothing was erased. (The executor wrote only its inspection files — the diskpart script and the boot command list.)"
+        }
         _ => "Nothing was changed by this operation.",
     }
 }
@@ -282,6 +326,7 @@ fn phase_label(id: &str) -> &str {
         "phase.restoring_files" => "Restoring files",
         "phase.file_rehearsal" => "Restoring sample files to a sandbox",
         "phase.building_media" => "Building recovery media",
+        "phase.restoring_system" => "Restoring system files",
         other => other,
     }
 }
@@ -1116,6 +1161,518 @@ fn cmd_media_verify(pos: &[String], mopts: &MediaOptions) -> i32 {
     if report.passed() {
         EXIT_OK
     } else {
+        EXIT_FAIL
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Whole-PC (bare-metal) restore (S5): `restore-system plan|execute|
+// verify`. Like the media group, the CLI is stateless across
+// invocations: plans are deterministic, so the plan id IS the token
+// — `execute` recomputes the plan from the same flags and only
+// proceeds when --plan-token matches that id exactly. (In-process
+// shells use the engine's random single-use tokens instead.)
+
+#[derive(Default)]
+struct RestoreSystemOptions {
+    passphrase: Option<String>,
+    recovery_key_file: Option<PathBuf>,
+    target_size: Option<u64>,
+    serial_suffix: Option<String>,
+    target_model: Option<String>,
+    removable: bool,
+    /// "uefi" | "bios" as stated by the operator.
+    firmware: Option<String>,
+    /// The operator states the firmware mode could not be determined.
+    firmware_unknown: bool,
+    os_root: Option<String>,
+    esp_root: Option<String>,
+    plan_token: Option<String>,
+    plan_out: Option<PathBuf>,
+    plan_file: Option<PathBuf>,
+    simulate: Option<PathBuf>,
+    disk_index: Option<u32>,
+    work_dir: Option<PathBuf>,
+    json: bool,
+}
+
+fn run_restore_system(args: &[String]) -> i32 {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        eprintln!("Error: restore-system needs a subcommand: plan, execute, or verify.");
+        print_usage();
+        return EXIT_USAGE;
+    };
+    let (pos, ropts) = match parse_restore_system_options(&args[1..]) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    match sub {
+        "plan" => cmd_restore_system_plan(&pos, &ropts),
+        "execute" => cmd_restore_system_execute(&pos, &ropts),
+        "verify" => cmd_restore_system_verify(&pos, &ropts),
+        other => {
+            eprintln!(
+                "Error: unknown restore-system subcommand '{other}' — use plan, execute, or verify."
+            );
+            EXIT_USAGE
+        }
+    }
+}
+
+fn parse_restore_system_options(
+    args: &[String],
+) -> std::result::Result<(Vec<String>, RestoreSystemOptions), String> {
+    let mut pos = Vec::new();
+    let mut o = RestoreSystemOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let take_value = |i: &mut usize| -> std::result::Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("flag {arg} needs a value"))
+        };
+        match arg.as_str() {
+            "--passphrase" => o.passphrase = Some(take_value(&mut i)?),
+            "--recovery-key" => o.recovery_key_file = Some(PathBuf::from(take_value(&mut i)?)),
+            "--target-size" => {
+                let v = take_value(&mut i)?;
+                o.target_size = Some(
+                    v.parse()
+                        .map_err(|_| format!("--target-size needs a byte count, got '{v}'"))?,
+                );
+            }
+            "--serial-suffix" => o.serial_suffix = Some(take_value(&mut i)?),
+            "--target-model" => o.target_model = Some(take_value(&mut i)?),
+            "--removable" => o.removable = true,
+            "--firmware" => o.firmware = Some(take_value(&mut i)?),
+            "--firmware-unknown" => o.firmware_unknown = true,
+            "--os-root" => o.os_root = Some(take_value(&mut i)?),
+            "--esp-root" => o.esp_root = Some(take_value(&mut i)?),
+            "--plan-token" => o.plan_token = Some(take_value(&mut i)?),
+            "--plan-out" => o.plan_out = Some(PathBuf::from(take_value(&mut i)?)),
+            "--plan" => o.plan_file = Some(PathBuf::from(take_value(&mut i)?)),
+            "--simulate" => o.simulate = Some(PathBuf::from(take_value(&mut i)?)),
+            "--disk-index" => {
+                let v = take_value(&mut i)?;
+                o.disk_index = Some(
+                    v.parse()
+                        .map_err(|_| format!("--disk-index needs a number, got '{v}'"))?,
+                );
+            }
+            "--work-dir" => o.work_dir = Some(PathBuf::from(take_value(&mut i)?)),
+            "--json" => o.json = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag '{flag}'")),
+            _ => pos.push(arg.clone()),
+        }
+        i += 1;
+    }
+    Ok((pos, o))
+}
+
+fn rs_credentials(ropts: &RestoreSystemOptions) -> Options {
+    Options {
+        passphrase: ropts.passphrase.clone(),
+        recovery_key_file: ropts.recovery_key_file.clone(),
+        ..Default::default()
+    }
+}
+
+/// The target facts, from the flags — the facts are what the
+/// operator states about the disk and the machine that will boot
+/// it. Firmware is never defaulted: it is stated (--firmware) or
+/// stated-unknown (--firmware-unknown), and planning refuses the
+/// unknown with its named error.
+fn build_restore_target(
+    ropts: &RestoreSystemOptions,
+) -> std::result::Result<SystemRestoreTargetFacts, String> {
+    let size = ropts
+        .target_size
+        .ok_or("--target-size <bytes> is required (the target disk's size)")?;
+    let serial = ropts
+        .serial_suffix
+        .clone()
+        .ok_or("--serial-suffix <last 4 of the disk serial> is required")?;
+    let firmware = if ropts.firmware_unknown {
+        Fact::unknown(
+            "operator statement (--firmware-unknown)",
+            "the operator could not determine the target PC's firmware mode",
+        )
+    } else {
+        match ropts.firmware.as_deref() {
+            Some("uefi") => Fact::known(BootMode::Uefi, "operator statement (--firmware uefi)"),
+            Some("bios") => Fact::known(BootMode::Bios, "operator statement (--firmware bios)"),
+            Some(other) => {
+                return Err(format!(
+                    "--firmware must be 'uefi' or 'bios', got '{other}'"
+                ))
+            }
+            None => {
+                return Err(
+                    "--firmware <uefi|bios> is required — state the target PC's firmware mode, or --firmware-unknown to state it could not be determined (planning will refuse, by name)"
+                        .to_string(),
+                )
+            }
+        }
+    };
+    Ok(SystemRestoreTargetFacts {
+        disk_id: "cli-target".to_string(),
+        model: ropts
+            .target_model
+            .clone()
+            .unwrap_or_else(|| "Target disk".into()),
+        serial_suffix: serial,
+        size_bytes: size,
+        removable: ropts.removable,
+        firmware,
+    })
+}
+
+fn build_restore_options(
+    ropts: &RestoreSystemOptions,
+) -> std::result::Result<SystemRestoreOptions, String> {
+    Ok(SystemRestoreOptions {
+        os_root: ropts
+            .os_root
+            .clone()
+            .ok_or("--os-root <set root> is required (the set root that captured the Windows volume)")?,
+        esp_root: ropts
+            .esp_root
+            .clone()
+            .ok_or("--esp-root <set root> is required (the set root that captured the EFI System Partition)")?,
+    })
+}
+
+/// Unlock the volume, read the set, compute the plan — shared by
+/// plan and execute. Err(i32) is a finished, reported outcome.
+fn compute_cli_system_restore_plan(
+    pos: &[String],
+    ropts: &RestoreSystemOptions,
+) -> std::result::Result<(UnlockedVolume, SystemRestorePlan), i32> {
+    if pos.len() < 2 {
+        eprintln!("Error: restore-system needs <volume> <set-id>.");
+        return Err(EXIT_USAGE);
+    }
+    let unlocked = match unlock(&pos[0], &rs_credentials(ropts)) {
+        Ok(u) => u,
+        Err(e) => return Err(report_error(&e)),
+    };
+    let target = match build_restore_target(ropts) {
+        Ok(t) => t,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return Err(EXIT_USAGE);
+        }
+    };
+    let options = match build_restore_options(ropts) {
+        Ok(o) => o,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return Err(EXIT_USAGE);
+        }
+    };
+    let manifest = match read_set_manifest(&unlocked, &pos[1]) {
+        Ok(m) => m,
+        Err(e) => return Err(report_error(&e)),
+    };
+    match plan_system_restore(&manifest, &target, &options) {
+        Ok(plan) => Ok((unlocked, plan)),
+        Err(e) => Err(report_error(&e)),
+    }
+}
+
+fn print_system_restore_plan(plan: &SystemRestorePlan, json: bool) {
+    if json {
+        let summary = safereturn_contract::SystemRestorePlan {
+            plan_token: plan.plan_id.clone(),
+            backup_id: plan.set_id.clone(),
+            target_disk_id: plan.target.disk_id.clone(),
+            target_summary: format!(
+                "{} (…{}): {} disk — {} partitions (GPT, UEFI), {} files, {} to restore",
+                plan.target.model,
+                plan.target.serial_suffix,
+                format_bytes(plan.target.size_bytes),
+                plan.layout.len(),
+                plan.total_file_count(),
+                format_bytes(plan.total_apply_bytes()),
+            ),
+            erase_warning_id: Some("system_restore.will_erase_target".to_string()),
+            firmware: "uefi".to_string(),
+            partition_count: plan.layout.len() as u64,
+            file_count: plan.total_file_count(),
+            total_bytes: plan.total_apply_bytes(),
+            warnings: plan.warnings.iter().map(|w| w.id().to_string()).collect(),
+        };
+        let msg = WireMessage::Event(Event::SystemRestorePlanned(summary));
+        println!(
+            "{}",
+            serde_json::to_string(&msg).unwrap_or_else(|_| "{}".to_string())
+        );
+        return;
+    }
+    println!(
+        "Target: {} (…{}) — {}",
+        plan.target.model,
+        plan.target.serial_suffix,
+        format_bytes(plan.target.size_bytes)
+    );
+    println!("Firmware: UEFI — GPT layout");
+    println!("Layout:");
+    for part in &plan.layout {
+        let role = match part.role {
+            PartitionRole::Esp => "EFI System Partition",
+            PartitionRole::Msr => "Microsoft Reserved (MSR)",
+            PartitionRole::Windows => "Windows",
+            PartitionRole::WinRe => "Windows RE tools",
+        };
+        let fs = match part.filesystem {
+            Some(PartitionFilesystem::Fat32) => "FAT32",
+            Some(PartitionFilesystem::Ntfs) => "NTFS",
+            None => "not formatted",
+        };
+        let letter = part
+            .drive_letter
+            .map(|l| format!(", letter {l} in WinPE"))
+            .unwrap_or_default();
+        println!(
+            "  {}. {} — {} {} (label {:?}{})",
+            part.index,
+            role,
+            format_bytes(part.size_bytes),
+            fs,
+            part.label.as_deref().unwrap_or(""),
+            letter
+        );
+        println!("     Size: {}", part.size_source);
+    }
+    let count_for = |role: PartitionRole| {
+        plan.applications
+            .iter()
+            .filter(|a| a.partition == role)
+            .count()
+    };
+    println!(
+        "Files: {} total ({} bytes) — {} to the ESP, {} to Windows{}",
+        plan.total_file_count(),
+        plan.total_apply_bytes(),
+        count_for(PartitionRole::Esp),
+        count_for(PartitionRole::Windows),
+        if plan.partition(PartitionRole::WinRe).is_some() {
+            ", 1 to the Windows RE partition (Winre.wim)"
+        } else {
+            ""
+        }
+    );
+    if !plan.warnings.is_empty() {
+        println!("Warnings — read these before executing:");
+        for w in &plan.warnings {
+            println!("  WARNING: {}", w.describe());
+        }
+    }
+    println!("After the files are in place:");
+    for (i, step) in plan.post_steps.iter().enumerate() {
+        println!("  {}. {}", i + 1, step.describe());
+        if let Some(cmd) = step.command() {
+            println!("     runs: {}", cmd.join(" "));
+        }
+    }
+    println!("Plan id: {}", plan.plan_id);
+}
+
+fn cmd_restore_system_plan(pos: &[String], ropts: &RestoreSystemOptions) -> i32 {
+    let (_unlocked, plan) = match compute_cli_system_restore_plan(pos, ropts) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    print_system_restore_plan(&plan, ropts.json);
+    if let Some(out) = &ropts.plan_out {
+        let json = match serde_json::to_string_pretty(&plan) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("Error: the plan could not be serialized: {e}");
+                return EXIT_FAIL;
+            }
+        };
+        match std::fs::write(out, json) {
+            Ok(()) => println!(
+                "Plan saved to {} (for restore-system verify).",
+                out.display()
+            ),
+            Err(e) => {
+                eprintln!(
+                    "Error: could not write the plan file {}: {e}",
+                    out.display()
+                );
+                return EXIT_FAIL;
+            }
+        }
+    }
+    if !ropts.json {
+        println!(
+            "Planning touched nothing. To execute this restore, run restore-system execute with the same flags and --plan-token {}.",
+            plan.plan_id
+        );
+    }
+    EXIT_OK
+}
+
+fn cmd_restore_system_execute(pos: &[String], ropts: &RestoreSystemOptions) -> i32 {
+    let Some(token) = &ropts.plan_token else {
+        eprintln!("Error: restore-system execute needs --plan-token <id> from `restore-system plan` — a whole-PC restore erases the target disk, so it only ever runs a plan you have seen.");
+        eprintln!("What was not changed: Nothing was touched — no disk was erased, partitioned, or written.");
+        return EXIT_USAGE;
+    };
+    let (unlocked, plan) = match compute_cli_system_restore_plan(pos, ropts) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    if plan.plan_id != *token {
+        eprintln!(
+            "Error: --plan-token does not match the plan these flags produce (that plan's id is {}). The facts changed since the plan you confirmed, or the token is wrong.",
+            plan.plan_id
+        );
+        eprintln!(
+            "What was not changed: Nothing was touched. Run `restore-system plan` again, check the plan, and execute with its id."
+        );
+        return EXIT_FAIL;
+    }
+    print_system_restore_plan(&plan, ropts.json);
+    if !ropts.json {
+        println!(
+            "WARNING: executing this restore ERASES the target disk ({}, …{}) completely — every file on it will be gone.",
+            plan.target.model, plan.target.serial_suffix
+        );
+    }
+
+    if let Some(sim_root) = &ropts.simulate {
+        let executor = SimulatedDiskExecutor {
+            root: sim_root.clone(),
+        };
+        let outcome = executor.execute(&unlocked, &plan, &mut |done, total| {
+            if !ropts.json {
+                eprintln!("  Restoring system: file {done}/{total}");
+            }
+        });
+        let execution = match outcome {
+            Ok(x) => x,
+            Err(e) => return report_error(&e),
+        };
+        println!(
+            "SIMULATION complete: {} files ({} bytes) applied to the fake disk at {}. No real disk was touched, and the boot commands (bcdboot, reagentc) were recorded in {} — NOT run.",
+            execution.files_written,
+            execution.bytes_written,
+            sim_root.display(),
+            RESTORE_LOG_FILE
+        );
+        return print_system_restore_verify(&plan, sim_root);
+    }
+
+    // Real-disk path: the platform executor (Windows skeleton /
+    // unsupported elsewhere). It renders its artifacts under the
+    // work dir and its result — success or named refusal — surfaces
+    // exactly as the engine produced it.
+    let work_dir = ropts
+        .work_dir
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("safereturn-restore-work"));
+    let executor = platform_system_restore_executor(ropts.disk_index.unwrap_or(0), work_dir);
+    match executor.execute(&unlocked, &plan, &mut |_, _| {}) {
+        Ok(execution) => {
+            println!(
+                "System restore executed from plan {}: {} files ({} bytes) applied.",
+                plan.plan_id, execution.files_written, execution.bytes_written
+            );
+            EXIT_OK
+        }
+        Err(e) => report_error(&e),
+    }
+}
+
+fn cmd_restore_system_verify(pos: &[String], ropts: &RestoreSystemOptions) -> i32 {
+    let Some(root) = pos.first() else {
+        eprintln!(
+            "Error: restore-system verify needs the applied root folder (e.g. a simulation folder)."
+        );
+        return EXIT_USAGE;
+    };
+    let Some(plan_file) = &ropts.plan_file else {
+        eprintln!(
+            "Error: restore-system verify needs --plan <file> (saved by restore-system plan --plan-out)."
+        );
+        return EXIT_USAGE;
+    };
+    let text = match std::fs::read_to_string(plan_file) {
+        Ok(t) => t,
+        Err(e) => {
+            return report_error(&CoreError::Io {
+                path: Some(plan_file.clone()),
+                source: e,
+            })
+        }
+    };
+    let plan: SystemRestorePlan = match serde_json::from_str(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            return report_error(&CoreError::Json {
+                path: plan_file.clone(),
+                source: e,
+            })
+        }
+    };
+    print_system_restore_verify(&plan, Path::new(root))
+}
+
+/// Shared renderer for the verify report (used by `verify` and by
+/// `execute --simulate`, which verifies what it just applied).
+fn print_system_restore_verify(plan: &SystemRestorePlan, root: &Path) -> i32 {
+    let report = match verify_system_restore(plan, root) {
+        Ok(r) => r,
+        Err(e) => return report_error(&e),
+    };
+    println!("Verification against plan {}:", report.plan_id);
+    for pv in &report.partitions {
+        let role = match pv.role {
+            PartitionRole::Esp => "EFI System Partition",
+            PartitionRole::Msr => "Microsoft Reserved (MSR)",
+            PartitionRole::Windows => "Windows",
+            PartitionRole::WinRe => "Windows RE tools",
+        };
+        println!("  {}: {}/{} files OK", role, pv.files_ok, pv.files_checked);
+        for m in &pv.missing {
+            println!("    MISSING {m}");
+        }
+        for m in &pv.mismatched {
+            println!("    DIFFERENT {m} (content does not match the backup)");
+        }
+    }
+    for bf in &report.esp_boot_files {
+        println!(
+            "  Boot file {}: {}",
+            bf.path,
+            if bf.present { "present" } else { "MISSING" }
+        );
+    }
+    match report.winre_image_present {
+        Some(true) => println!("  Windows RE image: present where the plan placed it"),
+        Some(false) => println!("  Windows RE image: MISSING"),
+        None => println!(
+            "  Windows RE image: the plan placed none (a disclosed gap in the plan's warnings)"
+        ),
+    }
+    println!(
+        "  Boot registration: NOT VERIFIED — the boot files are in place, but whether the boot configuration points at this Windows can only be proven by bcdboot's result on the machine and a real boot. File inspection does not prove it, and SafeReturn does not claim it."
+    );
+    if report.files_in_place() {
+        println!("Files: PASS — every file the plan called for is in place with matching content.");
+        EXIT_OK
+    } else {
+        println!(
+            "Files: FAIL — see the lines above. Do not boot from this restore until they are resolved."
+        );
         EXIT_FAIL
     }
 }

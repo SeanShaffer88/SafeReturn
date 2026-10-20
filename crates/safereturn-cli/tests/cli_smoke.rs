@@ -48,6 +48,192 @@ fn extract_set_id(text: &str) -> String {
 }
 
 #[test]
+fn cli_system_restore_simulation() {
+    let base = tmp("sysrestore");
+    // A tiny "PC": an OS root and an ESP root, with the file names
+    // the planner looks for.
+    let os_src = base.join("osroot");
+    let esp_src = base.join("esproot");
+    fs::create_dir_all(os_src.join("Windows/System32/Recovery")).unwrap();
+    fs::write(os_src.join("Windows/explorer.exe"), b"explorer-bytes").unwrap();
+    fs::write(
+        os_src.join("Windows/System32/Recovery/Winre.wim"),
+        b"winre-image-bytes",
+    )
+    .unwrap();
+    fs::create_dir_all(esp_src.join("EFI/Microsoft/Boot")).unwrap();
+    fs::create_dir_all(esp_src.join("EFI/Boot")).unwrap();
+    fs::write(esp_src.join("EFI/Boot/bootx64.efi"), b"bootx64").unwrap();
+    fs::write(esp_src.join("EFI/Microsoft/Boot/bootmgfw.efi"), b"bootmgfw").unwrap();
+
+    let volume = base.join("volume");
+    let volume_s = volume.to_string_lossy().into_owned();
+    // Explicit key location: the default lands in the process CWD,
+    // which parallel tests share.
+    let key_out = base.join("recovery-key.txt");
+    let key_s = key_out.to_string_lossy().into_owned();
+    let out = run(&[
+        "init-volume",
+        &volume_s,
+        "--recovery-key-out",
+        &key_s,
+        "--passphrase",
+        "smoke-test-pw",
+    ]);
+    assert!(out.status.success(), "init failed: {}", stderr(&out));
+
+    // Facts JSON for a UEFI PC with BitLocker on. The ESP listing is
+    // replaced by the CLI's fresh --esp-root listing, so it is an
+    // (honest) unknown here.
+    let facts = serde_json::json!({
+        "format_version": 1,
+        "gathered_unix": 1700004000,
+        "boot_mode": {"value": "uefi", "source": "smoke test"},
+        "secure_boot": {"value": true, "source": "smoke test"},
+        "bitlocker": {"C:": {"value": "on", "source": "smoke test"}},
+        "esp_files": {"value": null, "source": "smoke test",
+                      "unknown_reason": "replaced by the --esp-root listing"},
+        "winre": {"value": {"present": true,
+                            "location": "C:\\Windows\\System32\\Recovery\\Winre.wim"},
+                  "source": "smoke test"},
+        "bcd": {"included": false, "source": "smoke test",
+                "not_included_reason": "BCD is rebuilt by bcdboot during restore"}
+    });
+    let facts_path = base.join("facts.json");
+    fs::write(&facts_path, serde_json::to_string(&facts).unwrap()).unwrap();
+    let facts_s = facts_path.to_string_lossy().into_owned();
+    let esp_s = esp_src.to_string_lossy().into_owned();
+    let os_s = os_src.to_string_lossy().into_owned();
+
+    let out = run_pw(&[
+        "backup",
+        &volume_s,
+        "system-smoke",
+        &os_s,
+        &esp_s,
+        "--system-facts",
+        &facts_s,
+        "--esp-root",
+        &esp_s,
+    ]);
+    assert!(out.status.success(), "backup failed: {}", stderr(&out));
+    let set_id = extract_set_id(&stdout(&out));
+
+    // A plain file set as the refusal control.
+    let out = run_pw(&["backup", &volume_s, "files-only", &os_s]);
+    assert!(out.status.success(), "file backup failed: {}", stderr(&out));
+    let file_set_id = extract_set_id(&stdout(&out));
+
+    let plan_args = [
+        "--target-size",
+        "274877906944",
+        "--serial-suffix",
+        "1234",
+        "--os-root",
+        "osroot",
+        "--esp-root",
+        "esproot",
+        "--firmware",
+        "uefi",
+        "--passphrase",
+        "smoke-test-pw",
+    ];
+
+    // Plan the system set: layout, BitLocker warning, plan id.
+    let plan_file = base.join("plan.json");
+    let plan_file_s = plan_file.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = vec!["restore-system", "plan", &volume_s, &set_id];
+    args.extend(plan_args);
+    args.extend(["--plan-out", &plan_file_s]);
+    let out = run(&args);
+    assert!(out.status.success(), "plan failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("EFI System Partition"), "{text}");
+    assert!(text.contains("Windows RE tools"), "{text}");
+    assert!(text.contains("NOT encrypted"), "{text}"); // BitLocker warning
+    assert!(text.contains("bcdboot W:\\Windows /s S: /f UEFI"), "{text}");
+    let plan_id = text
+        .lines()
+        .find_map(|l| l.strip_prefix("Plan id: "))
+        .expect("plan id line")
+        .trim()
+        .to_string();
+    assert!(plan_file.exists());
+
+    // The file-only set is refused by name.
+    let mut args: Vec<&str> = vec!["restore-system", "plan", &volume_s, &file_set_id];
+    args.extend(plan_args);
+    let out = run(&args);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("no system information"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("What was not changed:"),
+        "{}",
+        stderr(&out)
+    );
+
+    // A firmware mismatch is refused by name.
+    let mut args: Vec<&str> = vec!["restore-system", "plan", &volume_s, &set_id];
+    args.extend(plan_args);
+    let bios_args: Vec<&str> = args
+        .iter()
+        .map(|a| if *a == "uefi" { "bios" } else { *a })
+        .collect();
+    let out = run(&bios_args);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("firmware"), "{}", stderr(&out));
+
+    // Execute with a wrong token: refused, nothing applied.
+    let sim = base.join("fake-disk");
+    let sim_s = sim.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = vec!["restore-system", "execute", &volume_s, &set_id];
+    args.extend(plan_args);
+    args.extend(["--plan-token", "deadbeef", "--simulate", &sim_s]);
+    let out = run(&args);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("does not match"), "{}", stderr(&out));
+    assert!(!sim.exists());
+
+    // Execute the real plan in simulation mode: applies + verifies.
+    let mut args: Vec<&str> = vec!["restore-system", "execute", &volume_s, &set_id];
+    args.extend(plan_args);
+    args.extend(["--plan-token", &plan_id, "--simulate", &sim_s]);
+    let out = run(&args);
+    assert!(out.status.success(), "execute failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("SIMULATION complete"), "{text}");
+    assert!(text.contains("Files: PASS"), "{text}");
+    assert!(text.contains("NOT VERIFIED"), "{text}");
+    assert_eq!(
+        fs::read(sim.join("windows/Windows/explorer.exe")).unwrap(),
+        b"explorer-bytes"
+    );
+    assert_eq!(
+        fs::read(sim.join("winre/Recovery/WindowsRE/Winre.wim")).unwrap(),
+        b"winre-image-bytes"
+    );
+    assert!(sim.join("safereturn-restore-log.json").exists());
+    assert!(sim.join("safereturn-diskpart.txt").exists());
+
+    // Verify subcommand against the saved plan file.
+    let out = run(&["restore-system", "verify", &sim_s, "--plan", &plan_file_s]);
+    assert!(out.status.success(), "verify failed: {}", stderr(&out));
+    assert!(stdout(&out).contains("Files: PASS"));
+
+    // Tamper, and verify names it and fails.
+    fs::write(sim.join("windows/Windows/explorer.exe"), b"tampered").unwrap();
+    let out = run(&["restore-system", "verify", &sim_s, "--plan", &plan_file_s]);
+    assert!(!out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("DIFFERENT Windows/explorer.exe"), "{text}");
+    assert!(text.contains("Files: FAIL"), "{text}");
+}
+
+#[test]
 fn cli_end_to_end() {
     let base = tmp("e2e");
     let src = base.join("docsSrc");
