@@ -24,7 +24,9 @@
 //! runtime verification.
 
 use crate::error::{CoreError, Result};
-use crate::media::{write_media_manifest, MediaPlan, MediaStep};
+use crate::media::MediaPlan;
+#[cfg(windows)]
+use crate::media::{write_media_manifest, MediaStep};
 
 /// Runs a confirmed media plan. `progress` receives (steps done,
 /// total steps) after each step completes.

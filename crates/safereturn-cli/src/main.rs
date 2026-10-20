@@ -62,6 +62,11 @@ fn run() -> i32 {
         print_usage();
         return EXIT_OK;
     }
+    // `media` is a subcommand group with its own flags (S4); it is
+    // dispatched before the shared option parser.
+    if cmd == "media" {
+        return run_media(&args[1..]);
+    }
     let (pos, opts) = match parse_options(&args[1..]) {
         Ok(v) => v,
         Err(msg) => {
@@ -99,6 +104,9 @@ Usage:
   safereturn restore-set <volume> <set-id> <target-folder> [--yes]
   safereturn restore-file <volume> <set-id> <path-in-set> <target-folder> [--yes]
   safereturn rehearse-file <volume> <set-id> [--file <path-in-set>]... [--sample <n>]
+  safereturn media plan --target-size <bytes> --serial-suffix <last4> --winpe-wim <file> [--removable] [--override-non-removable] [--payload <file>=<media/path>]... [--driver <inf>]...
+  safereturn media create --plan-token <id from media plan> <same target/winpe flags as the plan> [--target-spec <F:>]
+  safereturn media verify <media-root> [--data-root <ntfs-partition-root>]
 
 Credentials (every command except init-volume):
   --passphrase <p>        passphrase (or set SAFERETURN_PASSPHRASE, or be prompted)
@@ -113,6 +121,17 @@ loud warning, and the set is then recorded as a live capture.
 System facts: --system-facts <file> attaches a gatherer's facts JSON to
 the new set's manifest. With --esp-root <dir>, the facts' ESP listing
 is replaced by a fresh listing of <dir>.
+
+Recovery media (S4): `media plan` computes the layout for a target from
+the facts you pass (device size, serial suffix, WinPE .wim) and prints
+the plan plus its plan id — planning writes nothing. `media create`
+recomputes the plan from the same flags and only proceeds when
+--plan-token matches that plan id exactly; it prints the plan and the
+erase warning first. Creating media ERASES the target device. Real
+creation is Windows-only and additionally requires SR_MEDIA_LIVE=1.
+`media verify` checks built media anywhere: payload hashes, boot
+files, and the boot-test marker (fresh media honestly reports
+NOT TESTED YET).
 
 Other flags: --json (contract JSON events), --yes (confirm a restore plan
 that replaces files), --keep-sandbox (rehearse-file: keep the sandbox)."
@@ -238,6 +257,17 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         CoreError::InvalidSystemFacts { .. } | CoreError::SystemFactsAlreadyPresent { .. } => {
             "The backup set itself is untouched — no facts were attached or changed."
         }
+        CoreError::MediaTargetTooSmall { .. }
+        | CoreError::MediaPayloadTooLarge { .. }
+        | CoreError::MediaTargetNotRemovable
+        | CoreError::MediaSourceMissing { .. }
+        | CoreError::MediaInvalidFacts { .. }
+        | CoreError::MediaInvalidPlanToken
+        | CoreError::MediaPlanStale { .. }
+        | CoreError::UnsupportedPlatform { .. }
+        | CoreError::LiveNotEnabled { .. } => {
+            "Nothing was written to any device — no media was created or erased."
+        }
         _ => "Nothing was changed by this operation.",
     }
 }
@@ -251,6 +281,7 @@ fn phase_label(id: &str) -> &str {
         "phase.checking_backup" => "Checking backup chunks",
         "phase.restoring_files" => "Restoring files",
         "phase.file_rehearsal" => "Restoring sample files to a sandbox",
+        "phase.building_media" => "Building recovery media",
         other => other,
     }
 }
@@ -704,6 +735,388 @@ fn cmd_rehearse(pos: &[String], opts: &Options) -> i32 {
             }
         }
         Err(e) => report_error(&e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recovery media (S4): plan / create / verify.
+//
+// The CLI is stateless between runs, so its confirmation token is the
+// plan's deterministic id: `media plan` prints it, `media create`
+// recomputes the plan from the same flags and refuses unless the
+// supplied --plan-token equals that id. The guarantee the user cares
+// about is identical to the engine's token flow: what gets created is
+// exactly the plan that was printed — different facts, no create.
+// (In-process shells use the engine's random single-use tokens.)
+//
+// The payload defaults to this CLI's own executable staged as
+// safereturn/safereturn.exe when no --payload is given: the media
+// needs *a* recovery program on it, and in this support CLI the
+// honest stand-in is the tool itself. Real shells pass the Win32 PE
+// shell + engine payload explicitly.
+
+#[derive(Default)]
+struct MediaOptions {
+    target_size: Option<u64>,
+    removable: bool,
+    override_non_removable: bool,
+    serial_suffix: Option<String>,
+    target_model: Option<String>,
+    winpe_wim: Option<PathBuf>,
+    adk_version: Option<String>,
+    drivers: Vec<String>,
+    /// (source file, media-relative destination) pairs.
+    payload: Vec<(PathBuf, String)>,
+    plan_token: Option<String>,
+    target_spec: Option<String>,
+    data_root: Option<PathBuf>,
+    json: bool,
+}
+
+fn run_media(args: &[String]) -> i32 {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        eprintln!("Error: media needs a subcommand: plan, create, or verify.");
+        print_usage();
+        return EXIT_USAGE;
+    };
+    let (pos, mopts) = match parse_media_options(&args[1..]) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    match sub {
+        "plan" => cmd_media_plan(&mopts),
+        "create" => cmd_media_create(&mopts),
+        "verify" => cmd_media_verify(&pos, &mopts),
+        other => {
+            eprintln!("Error: unknown media subcommand '{other}' — use plan, create, or verify.");
+            EXIT_USAGE
+        }
+    }
+}
+
+fn parse_media_options(
+    args: &[String],
+) -> std::result::Result<(Vec<String>, MediaOptions), String> {
+    let mut pos = Vec::new();
+    let mut o = MediaOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let take_value = |i: &mut usize| -> std::result::Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("flag {arg} needs a value"))
+        };
+        match arg.as_str() {
+            "--target-size" => {
+                let v = take_value(&mut i)?;
+                o.target_size = Some(
+                    v.parse()
+                        .map_err(|_| format!("--target-size needs a byte count, got '{v}'"))?,
+                );
+            }
+            "--removable" => o.removable = true,
+            "--override-non-removable" => o.override_non_removable = true,
+            "--serial-suffix" => o.serial_suffix = Some(take_value(&mut i)?),
+            "--target-model" => o.target_model = Some(take_value(&mut i)?),
+            "--winpe-wim" => o.winpe_wim = Some(PathBuf::from(take_value(&mut i)?)),
+            "--adk-version" => o.adk_version = Some(take_value(&mut i)?),
+            "--driver" => o.drivers.push(take_value(&mut i)?),
+            "--payload" => {
+                let v = take_value(&mut i)?;
+                let (src, rel) = v
+                    .split_once('=')
+                    .ok_or_else(|| format!("--payload needs <file>=<media/path>, got '{v}'"))?;
+                o.payload.push((PathBuf::from(src), rel.to_string()));
+            }
+            "--plan-token" => o.plan_token = Some(take_value(&mut i)?),
+            "--target-spec" => o.target_spec = Some(take_value(&mut i)?),
+            "--data-root" => o.data_root = Some(PathBuf::from(take_value(&mut i)?)),
+            "--json" => o.json = true,
+            flag if flag.starts_with("--") => return Err(format!("unknown flag '{flag}'")),
+            _ => pos.push(arg.clone()),
+        }
+        i += 1;
+    }
+    Ok((pos, o))
+}
+
+/// Build the media facts from the flags — the facts are what the
+/// operator states and what this machine can measure (the .wim and
+/// payload files are read and hashed here, in the shell, because the
+/// engine plans from facts, not from paths it should not trust).
+fn build_media_facts(mopts: &MediaOptions) -> std::result::Result<MediaFacts, String> {
+    let size = mopts
+        .target_size
+        .ok_or("--target-size <bytes> is required (the target device's size)")?;
+    let serial = mopts
+        .serial_suffix
+        .clone()
+        .ok_or("--serial-suffix <last 4 of the device serial> is required")?;
+    let wim = mopts.winpe_wim.clone().ok_or(
+        "--winpe-wim <file> is required (the winpe.wim from your ADK WinPE working files)",
+    )?;
+    let (wim_present, wim_size) = match std::fs::metadata(&wim) {
+        Ok(m) if m.is_file() => (true, m.len()),
+        _ => (false, 0),
+    };
+    let mut payload = Vec::new();
+    if mopts.payload.is_empty() {
+        // Default payload: this executable, staged under safereturn/.
+        let exe = std::env::current_exe().map_err(|e| {
+            format!("could not locate this executable for the default payload: {e}")
+        })?;
+        let data = std::fs::read(&exe)
+            .map_err(|e| format!("could not read {} for the payload: {e}", exe.display()))?;
+        payload.push(PayloadFact {
+            source_path: exe.to_string_lossy().into_owned(),
+            dest_rel: "safereturn/safereturn.exe".into(),
+            size_bytes: data.len() as u64,
+            sha256: sha256_hex(&data),
+        });
+    } else {
+        for (src, rel) in &mopts.payload {
+            let data = std::fs::read(src)
+                .map_err(|e| format!("could not read payload file {}: {e}", src.display()))?;
+            payload.push(PayloadFact {
+                source_path: src.to_string_lossy().into_owned(),
+                dest_rel: rel.clone(),
+                size_bytes: data.len() as u64,
+                sha256: sha256_hex(&data),
+            });
+        }
+    }
+    Ok(MediaFacts {
+        target: MediaTargetFacts {
+            disk_id: String::new(),
+            model: mopts
+                .target_model
+                .clone()
+                .unwrap_or_else(|| "USB device".into()),
+            serial_suffix: serial,
+            size_bytes: size,
+            removable: mopts.removable,
+        },
+        winpe: WinPeSourceFacts {
+            wim_path: wim.to_string_lossy().into_owned(),
+            wim_size_bytes: wim_size,
+            present: wim_present,
+            adk_version: mopts.adk_version.clone(),
+        },
+        drivers: mopts.drivers.clone(),
+        payload,
+    })
+}
+
+fn media_plan_options(mopts: &MediaOptions) -> MediaPlanOptions {
+    MediaPlanOptions {
+        allow_non_removable: mopts.override_non_removable,
+    }
+}
+
+fn print_media_plan(plan: &MediaPlan, token: &str, json: bool) {
+    if json {
+        let summary = safereturn_contract::MediaPlan {
+            plan_token: token.to_string(),
+            target_disk_id: plan.facts.target.disk_id.clone(),
+            target_summary: format!(
+                "{} (…{}): {} device — {} boot (FAT32), {} data (NTFS)",
+                plan.facts.target.model,
+                plan.facts.target.serial_suffix,
+                format_bytes(plan.facts.target.size_bytes),
+                format_bytes(plan.layout.boot_partition_bytes),
+                format_bytes(plan.layout.data_partition_bytes),
+            ),
+            erase_warning_id: Some("media.will_erase_target".to_string()),
+            boot_partition_bytes: plan.layout.boot_partition_bytes,
+            data_partition_bytes: plan.layout.data_partition_bytes,
+            payload_bytes: plan.payload_total_bytes,
+            warnings: plan.warnings.iter().map(|w| w.id().to_string()).collect(),
+        };
+        let msg = WireMessage::Event(Event::MediaPlanned(summary));
+        println!(
+            "{}",
+            serde_json::to_string(&msg).unwrap_or_else(|_| "{}".to_string())
+        );
+        return;
+    }
+    println!(
+        "Target: {} (…{}) — {}",
+        plan.facts.target.model,
+        plan.facts.target.serial_suffix,
+        format_bytes(plan.facts.target.size_bytes)
+    );
+    println!(
+        "Layout: {} FAT32 boot partition + {} NTFS data partition",
+        format_bytes(plan.layout.boot_partition_bytes),
+        format_bytes(plan.layout.data_partition_bytes)
+    );
+    println!(
+        "Payload: {} in {} file(s); WinPE image: {}",
+        format_bytes(plan.payload_total_bytes),
+        plan.facts.payload.len(),
+        format_bytes(plan.facts.winpe.wim_size_bytes)
+    );
+    if !plan.facts.drivers.is_empty() {
+        println!("Drivers from this PC: {}", plan.facts.drivers.len());
+    }
+    for w in &plan.warnings {
+        match w {
+            MediaWarning::NonRemovableOverride => println!(
+                "WARNING: this device is NOT removable media, and the override was given. \
+                 Creating media ERASES it completely. This warning is recorded on the media."
+            ),
+        }
+    }
+    println!("Steps:");
+    for (i, step) in plan.steps.iter().enumerate() {
+        println!("  {}. {}", i + 1, step.describe());
+    }
+    println!("Plan id: {token}");
+}
+
+fn cmd_media_plan(mopts: &MediaOptions) -> i32 {
+    let facts = match build_media_facts(mopts) {
+        Ok(f) => f,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    match plan_media(&facts, &media_plan_options(mopts)) {
+        Ok(plan) => {
+            let token = plan.plan_id.clone();
+            print_media_plan(&plan, &token, mopts.json);
+            if !mopts.json {
+                println!(
+                    "Planning changed nothing. To create this media, run media create with the same flags and --plan-token {token}."
+                );
+            }
+            EXIT_OK
+        }
+        Err(e) => report_error(&e),
+    }
+}
+
+fn cmd_media_create(mopts: &MediaOptions) -> i32 {
+    let Some(token) = &mopts.plan_token else {
+        eprintln!("Error: media create needs --plan-token <id> from `media plan` — creating media erases the target, so it only ever runs a plan you have seen.");
+        eprintln!("What was not changed: Nothing was written to any device.");
+        return EXIT_USAGE;
+    };
+    let facts = match build_media_facts(mopts) {
+        Ok(f) => f,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return EXIT_USAGE;
+        }
+    };
+    let plan = match plan_media(&facts, &media_plan_options(mopts)) {
+        Ok(p) => p,
+        Err(e) => return report_error(&e),
+    };
+    if plan.plan_id != *token {
+        eprintln!(
+            "Error: --plan-token does not match the plan these flags produce (that plan's id is {}). The facts changed since the plan you confirmed, or the token is wrong.",
+            plan.plan_id
+        );
+        eprintln!("What was not changed: Nothing was written to any device. Run `media plan` again, check the plan, and create with its id.");
+        return EXIT_FAIL;
+    }
+    print_media_plan(&plan, &plan.plan_id, mopts.json);
+    if !mopts.json {
+        println!(
+            "WARNING: creating this media ERASES the target device ({}, …{}) completely — every file on it will be gone.",
+            plan.facts.target.model, plan.facts.target.serial_suffix
+        );
+    }
+    let executor = platform_executor(mopts.target_spec.clone().unwrap_or_default());
+    match executor.execute(&plan, &mut |done, total| {
+        if !mopts.json {
+            eprintln!("  Building media: step {done}/{total}");
+        }
+    }) {
+        Ok(()) => {
+            println!(
+                "Media created from plan {}. It is NOT boot-tested yet — boot the PC from it once and let the recovery shell start; that test is recorded on the media. Until then, do not count on it.",
+                plan.plan_id
+            );
+            EXIT_OK
+        }
+        Err(e) => report_error(&e),
+    }
+}
+
+fn cmd_media_verify(pos: &[String], mopts: &MediaOptions) -> i32 {
+    let Some(root) = pos.first() else {
+        eprintln!("Error: media verify needs the media root folder (the boot/FAT32 partition, mounted or copied).");
+        return EXIT_USAGE;
+    };
+    let report = match verify_media_roots(Path::new(root), mopts.data_root.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return report_error(&e),
+    };
+    let m = &report.manifest;
+    println!(
+        "Media manifest: plan {}, created {} by SafeReturn core {}",
+        m.plan_id,
+        fmt_datetime(m.created_unix),
+        m.created_by_version
+    );
+    if m.warnings_shown.is_empty() {
+        println!("Warnings shown at creation: none");
+    } else {
+        println!(
+            "Warnings shown at creation: {}",
+            m.warnings_shown.join(", ")
+        );
+    }
+    for check in &report.payload {
+        if check.ok {
+            println!("  OK   {} — {}", check.dest_rel, check.detail);
+        } else {
+            println!("  FAIL {} — {}", check.dest_rel, check.detail);
+        }
+    }
+    for bf in &report.boot_files {
+        println!("  {} {}", if bf.present { "OK  " } else { "MISS" }, bf.path);
+    }
+    println!(
+        "Integrity: {}",
+        if report.passed() {
+            "PASS — payload and boot files match the manifest"
+        } else {
+            "FAIL — see the lines above; rebuild this media before trusting it"
+        }
+    );
+    match &report.boot_test {
+        BootTestStatus::Tested {
+            booted_unix,
+            firmware,
+        } => println!(
+            "Boot test: PASSED — this media booted {} ({}) and reached the recovery shell.",
+            fmt_datetime(*booted_unix),
+            firmware.as_deref().unwrap_or("firmware unknown")
+        ),
+        BootTestStatus::BootStartedShellNotReached { booted_unix, .. } => println!(
+            "Boot test: PARTIAL — this media booted {} but did NOT reach the recovery shell. It is not proven. Investigate before trusting it.",
+            fmt_datetime(*booted_unix)
+        ),
+        BootTestStatus::Invalid { reason } => println!(
+            "Boot test: marker INVALID — {reason}. Not counted as tested."
+        ),
+        BootTestStatus::NotTested => println!(
+            "Boot test: NOT TESTED YET — this media has never reported a boot. It may work, but that is not proven. Boot the PC from it once and let the recovery shell start; the shell records the test on the media."
+        ),
+    }
+    if report.passed() {
+        EXIT_OK
+    } else {
+        EXIT_FAIL
     }
 }
 

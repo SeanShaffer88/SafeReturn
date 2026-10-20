@@ -339,3 +339,232 @@ fn cli_snapshot_flag_off_windows() {
 
     let _ = fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// S4: media plan / create / verify through the real binary.
+
+fn make_wim(base: &Path) -> (String, u64) {
+    let wim = base.join("winpe.wim");
+    fs::write(&wim, vec![7u8; 4096]).unwrap();
+    (wim.to_string_lossy().into_owned(), 4096)
+}
+
+fn plan_id_of(text: &str) -> String {
+    text.lines()
+        .find_map(|l| l.strip_prefix("Plan id: "))
+        .expect("plan output carries a Plan id line")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn cli_media_plan_and_create_token_discipline() {
+    let base = tmp("s4-plan");
+    fs::create_dir_all(&base).unwrap();
+    let (wim, _size) = make_wim(&base);
+    let target_size = (16 * 1024 * 1024 * 1024u64).to_string();
+    let plan_args = [
+        "media",
+        "plan",
+        "--target-size",
+        target_size.as_str(),
+        "--removable",
+        "--serial-suffix",
+        "X7K2",
+        "--winpe-wim",
+        wim.as_str(),
+    ];
+    let out = run(&plan_args);
+    assert!(out.status.success(), "media plan failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("FAT32 boot partition"), "plan output: {text}");
+    assert!(text.contains("Steps:"), "plan output: {text}");
+    assert!(text.contains("MakeWinPEMedia"), "plan output: {text}");
+    assert!(
+        text.contains("Planning changed nothing"),
+        "plan output: {text}"
+    );
+    let plan_id = plan_id_of(&text);
+
+    // Planning is deterministic: same facts, same plan id.
+    let out = run(&plan_args);
+    assert_eq!(plan_id_of(&stdout(&out)), plan_id);
+
+    // JSON mode emits the contract MediaPlanned event with the plan id
+    // as the token.
+    let mut json_args = plan_args.to_vec();
+    json_args.push("--json");
+    let out = run(&json_args);
+    assert!(
+        out.status.success(),
+        "media plan --json failed: {}",
+        stderr(&out)
+    );
+    let v: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(v["kind"], "event");
+    assert_eq!(v["type"], "media_planned");
+    assert_eq!(v["plan_token"], plan_id);
+    assert_eq!(v["erase_warning_id"], "media.will_erase_target");
+
+    // Refusals still speak plainly through the CLI.
+    let out = run(&[
+        "media",
+        "plan",
+        "--target-size",
+        "1000",
+        "--removable",
+        "--serial-suffix",
+        "X7K2",
+        "--winpe-wim",
+        wim.as_str(),
+    ]);
+    assert!(!out.status.success(), "tiny target must be refused");
+    assert!(
+        stderr(&out).contains("too small"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("Nothing was written to any device"),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn cli_media_create_off_windows() {
+    let base = tmp("s4-create");
+    fs::create_dir_all(&base).unwrap();
+    let (wim, _size) = make_wim(&base);
+    let target_size = (16 * 1024 * 1024 * 1024u64).to_string();
+    let plan_args = [
+        "media",
+        "plan",
+        "--target-size",
+        target_size.as_str(),
+        "--removable",
+        "--serial-suffix",
+        "X7K2",
+        "--winpe-wim",
+        wim.as_str(),
+    ];
+    let out = run(&plan_args);
+    let plan_id = plan_id_of(&stdout(&out));
+
+    // Wrong token: refused before any executor is consulted.
+    let mut bad = plan_args.to_vec();
+    bad[1] = "create";
+    bad.extend(["--plan-token", "not-the-plan-id"]);
+    let out = run(&bad);
+    assert!(!out.status.success(), "wrong token must be refused");
+    assert!(
+        stderr(&out).contains("does not match the plan"),
+        "stderr: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("Nothing was written to any device"),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    // Right token off Windows: the plan and the ERASE warning print,
+    // then the typed unsupported-platform error — nothing is created.
+    let mut good = plan_args.to_vec();
+    good[1] = "create";
+    good.extend(["--plan-token", plan_id.as_str()]);
+    let out = run(&good);
+    assert!(!out.status.success(), "create cannot succeed off Windows");
+    assert!(
+        stdout(&out).contains("ERASES the target device"),
+        "stdout: {}",
+        stdout(&out)
+    );
+    assert!(
+        stderr(&out).contains("only works on Windows"),
+        "stderr: {}",
+        stderr(&out)
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn cli_media_verify_reports_facts_and_names_tampering() {
+    use safereturn_core::*;
+    let base = tmp("s4-verify");
+    let boot = base.join("boot");
+    let data = base.join("data");
+    fs::create_dir_all(boot.join("safereturn")).unwrap();
+    fs::create_dir_all(boot.join("EFI/Boot")).unwrap();
+    fs::create_dir_all(boot.join("sources")).unwrap();
+    fs::create_dir_all(&data).unwrap();
+    let app = b"recovery shell bytes";
+    fs::write(boot.join("safereturn/app.exe"), app).unwrap();
+    fs::write(boot.join("EFI/Boot/bootx64.efi"), b"efi").unwrap();
+    fs::write(boot.join("sources/boot.wim"), b"wim").unwrap();
+
+    let facts = MediaFacts {
+        target: MediaTargetFacts {
+            disk_id: "disk-cli".into(),
+            model: "USB Flash Drive".into(),
+            serial_suffix: "X7K2".into(),
+            size_bytes: 16 * 1024 * 1024 * 1024,
+            removable: true,
+        },
+        winpe: WinPeSourceFacts {
+            wim_path: "winpe.wim".into(),
+            wim_size_bytes: 400 * 1024 * 1024,
+            present: true,
+            adk_version: None,
+        },
+        drivers: vec![],
+        payload: vec![PayloadFact {
+            source_path: "host/app.exe".into(),
+            dest_rel: "safereturn/app.exe".into(),
+            size_bytes: app.len() as u64,
+            sha256: sha256_hex(app),
+        }],
+    };
+    let plan = plan_media(&facts, &MediaPlanOptions::default()).unwrap();
+    write_media_manifest(&boot, &plan, 1_700_003_000).unwrap();
+
+    let boot_s = boot.to_string_lossy().into_owned();
+    let data_s = data.to_string_lossy().into_owned();
+    let out = run(&["media", "verify", &boot_s, "--data-root", &data_s]);
+    assert!(out.status.success(), "verify failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("Integrity: PASS"), "stdout: {text}");
+    assert!(text.contains("NOT TESTED YET"), "stdout: {text}");
+
+    // After a recorded boot test, the same media reports the date.
+    record_boot_test(
+        &data,
+        &plan.plan_id,
+        Some("UEFI".into()),
+        true,
+        1_700_004_000,
+    )
+    .unwrap();
+    let out = run(&["media", "verify", &boot_s, "--data-root", &data_s]);
+    assert!(out.status.success(), "verify failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("Boot test: PASSED"), "stdout: {text}");
+    assert!(
+        text.contains("2023-11-14 23:20 UTC"),
+        "marker date shown: {text}"
+    );
+
+    // Tampering is named, and verify exits non-zero.
+    fs::write(boot.join("safereturn/app.exe"), b"tampered shell bytes!").unwrap();
+    let out = run(&["media", "verify", &boot_s, "--data-root", &data_s]);
+    assert!(!out.status.success(), "tampered media must fail verify");
+    let text = stdout(&out);
+    assert!(text.contains("FAIL safereturn/app.exe"), "stdout: {text}");
+    assert!(text.contains("Integrity: FAIL"), "stdout: {text}");
+
+    let _ = fs::remove_dir_all(&base);
+}
