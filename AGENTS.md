@@ -39,7 +39,12 @@ lives in `docs/` — read `ARCHITECTURE_AND_UX_PLAN.md` before changing behavior
 ```sh
 cargo fmt --all
 cargo test --workspace                                   # full suite, never a filtered subset
-cargo check --workspace --target x86_64-pc-windows-msvc  # GUI/FFI tests & code live in all targets
+cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+# --all-targets is load-bearing: test files are targets too, and
+# cfg(windows) test code compiles nowhere else. S3's first CI runs
+# failed on exactly that — a borrow error in a Windows-only test that
+# every other gate had passed. (Plain `cargo check --target` does not
+# compile test targets.)
 ```
 CI additionally compiles the C++ VSS helper on `windows-latest`.
 Report exactly what ran and what was not verified (e.g. Windows runtime,

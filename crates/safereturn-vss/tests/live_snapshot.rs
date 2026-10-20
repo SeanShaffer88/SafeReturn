@@ -37,9 +37,12 @@ fn live_snapshot_begin_and_finish() {
     {
         let session = safereturn_vss::SnapshotSession::begin("C:\\")
             .expect("elevated on Windows, begin must create a snapshot (S0.5 check)");
+        // Owned copy: finish() consumes the session, so no borrow of
+        // it may live past this point.
         let device = session
             .device_root()
-            .expect("a live session has a device root");
+            .expect("a live session has a device root")
+            .to_string();
         assert!(
             device.contains("GLOBALROOT") && device.contains("HarddiskVolumeShadowCopy"),
             "device root must be a snapshot device object, got: {device}"

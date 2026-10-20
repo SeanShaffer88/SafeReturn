@@ -61,6 +61,10 @@ Tests (CLI smoke, +2): facts attach end-to-end incl. the `--esp-root` override a
 - **Set manifest (core-internal format):** added `capture_mode` (defaulted — old manifests parse) and optional `system` (omitted when absent — old manifests and plain file sets are byte-shaped as before).
 - **No new dependencies.** Cargo.lock changed only for the CLI → safereturn-vss path dependency.
 
+## CI history (recorded honestly)
+
+The first four S3 pushes were **red on the Windows job** (Linux job green throughout): a borrow error (E0505) in the Windows-only block of `tests/live_snapshot.rs` — `device_root()` borrowed the session, then `finish()` moved it. Every local gate had passed because the repo's windows-target check did not compile *test* targets, and the file is `cfg(windows)`-gated out everywhere else. Fixed by owning the device string before `finish()`, and the gate itself was hardened: the repo's AGENTS.md gate now reads `cargo check --workspace --all-targets --target x86_64-pc-windows-msvc`, with the reason recorded next to it. The fix slice's CI run is the one that counts; its result is in the S3 completion report (and, if green, this paragraph stands as the record of the failure).
+
 ## UNVERIFIED — what the S0.5 on-machine session must still prove
 
 Everything in this section is stated plainly because none of it has been observed working:
