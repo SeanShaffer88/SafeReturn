@@ -149,6 +149,14 @@ pub enum CoreError {
     MediaInvalidFacts {
         reason: String,
     },
+    /// Recovery Card facts that cannot be used: no PC description,
+    /// a drive serial suffix that is not exactly the last 4
+    /// characters, an empty stated boot key. A card with wrong
+    /// drive identification sends a stressed reader to the wrong
+    /// disk, so generation refuses rather than guessing (S6).
+    RecoveryCardInvalidFacts {
+        reason: String,
+    },
     /// Media plan token is unknown, already used, or not a token.
     MediaInvalidPlanToken,
     /// The target device changed after the media plan was made (size,
@@ -293,6 +301,7 @@ impl CoreError {
             CoreError::MediaTargetNotRemovable => "media.target_not_removable",
             CoreError::MediaSourceMissing { .. } => "media.winpe_source_missing",
             CoreError::MediaInvalidFacts { .. } => "media.invalid_facts",
+            CoreError::RecoveryCardInvalidFacts { .. } => "recovery_card.invalid_facts",
             CoreError::MediaInvalidPlanToken => "media.invalid_plan_token",
             CoreError::MediaPlanStale { .. } => "media.plan_stale",
             CoreError::MediaManifestMissing { .. } => "media.manifest_missing",
@@ -425,6 +434,10 @@ impl fmt::Display for CoreError {
             CoreError::MediaInvalidFacts { reason } => write!(
                 f,
                 "the media facts are not usable: {reason}. Nothing was written to the device. Fix the facts and plan again."
+            ),
+            CoreError::RecoveryCardInvalidFacts { reason } => write!(
+                f,
+                "the Recovery Card facts are not usable: {reason}. No card was made. Fix the facts and generate it again."
             ),
             CoreError::MediaInvalidPlanToken => write!(
                 f,
