@@ -106,6 +106,17 @@ pub enum CoreError {
     RestoreConflict {
         path: String,
     },
+    /// System facts failed validation: an unknown without a reason, a
+    /// fact without a source, an ambiguous BCD capture, or an
+    /// unsupported facts format version (S3 honesty schema).
+    InvalidSystemFacts {
+        reason: String,
+    },
+    /// A set already carries a system-facts section; recorded facts
+    /// are never silently replaced.
+    SystemFactsAlreadyPresent {
+        set_id: String,
+    },
     /// Plan token is unknown, already used, or not a token at all.
     InvalidPlanToken,
     /// The target changed after the restore plan was made; the plan no
@@ -136,6 +147,8 @@ impl CoreError {
             CoreError::RootNameCollision { .. } => "backup.root_name_collision",
             CoreError::CaptureRootOutsideVolume { .. } => "backup.capture_root_outside_volume",
             CoreError::RestoreConflict { .. } => "restore.conflict",
+            CoreError::InvalidSystemFacts { .. } => "backup.invalid_system_facts",
+            CoreError::SystemFactsAlreadyPresent { .. } => "set.system_facts_already_present",
             CoreError::InvalidPlanToken => "restore.invalid_plan_token",
             CoreError::PlanStale { .. } => "restore.plan_stale",
         }
@@ -207,6 +220,14 @@ impl fmt::Display for CoreError {
             CoreError::RestoreConflict { path } => write!(
                 f,
                 "restore stopped before writing {path}: a different file is already there and it was not in the approved plan. Nothing was overwritten. Make a new restore plan to see the current state."
+            ),
+            CoreError::InvalidSystemFacts { reason } => write!(
+                f,
+                "the system facts are not usable: {reason}. Facts must name a source for every value, and a reason for every value that could not be determined. Nothing was attached to the backup set."
+            ),
+            CoreError::SystemFactsAlreadyPresent { set_id } => write!(
+                f,
+                "backup set {set_id} already has system facts recorded, and recorded facts are never replaced silently. The existing facts were left exactly as they were."
             ),
             CoreError::InvalidPlanToken => write!(
                 f,

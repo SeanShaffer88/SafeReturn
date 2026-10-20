@@ -1,5 +1,7 @@
-//! SafeReturn core — the backup engine library (no UI, no Windows-only
-//! code). Everything a shell can ask the engine to do is built on this.
+//! SafeReturn core — the backup engine library. No UI. Everything a
+//! shell can ask the engine to do is built on this. Platform-agnostic
+//! except for one fenced-off piece: the S3 Windows system-facts
+//! gatherer skeleton (`system`, cfg(windows)).
 //!
 //! Modules:
 //! - `plain` — the original S1 prototype store (unencrypted), kept as the
@@ -13,6 +15,9 @@
 //!   mapped snapshot root — and manifests record which one was used.
 //! - `sets` — backup sets and their manifests, Level-1 verify, restore,
 //!   and the manifest-rebuildable catalog.
+//! - `system` — system facts for system sets (S3): boot mode, Secure
+//!   Boot, BitLocker, ESP contents, WinRE, BCD capture status — each
+//!   fact sourced, each unknown explicit and reasoned.
 //! - `engine` — the shell-contract-facing API: contract events, restore
 //!   plans with single-use plan tokens, Level-2 File Rehearsal.
 //! - `error` — named errors with stable machine codes and fix paths.
@@ -24,6 +29,7 @@ pub mod error;
 pub mod hex;
 pub mod plain;
 pub mod sets;
+pub mod system;
 pub mod volume;
 
 pub use error::{ChunkCorruptReason, CoreError, Result};
@@ -38,10 +44,17 @@ pub use engine::{
     format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry, FileRehearsalReport,
 };
 pub use sets::{
-    backup_tree, backup_tree_with_source, list_set_ids, list_sets, plan_target_states,
-    read_catalog, read_set_manifest, rebuild_catalog, restore_file, restore_files, restore_set,
-    summarize, verify_set, BackupOutcome, Catalog, CatalogSet, ChunkFailure, RestoreOutcome,
-    SetFileEntry, SetManifest, SetVerifyReport, SkippedEntry, TargetState, SET_CHUNK_SIZE,
-    SET_FORMAT_VERSION,
+    attach_system_facts, backup_tree, backup_tree_with_source, list_set_ids, list_sets,
+    plan_target_states, read_catalog, read_set_manifest, rebuild_catalog, restore_file,
+    restore_files, restore_set, summarize, verify_set, BackupOutcome, Catalog, CatalogSet,
+    ChunkFailure, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport, SkippedEntry,
+    TargetState, SET_CHUNK_SIZE, SET_FORMAT_VERSION,
+};
+#[cfg(windows)]
+pub use system::WindowsFactsGatherer;
+pub use system::{
+    esp_fact, list_esp_files, parse_system_facts, BcdCapture, BitLockerState, BootMode, EspFile,
+    Fact, StaticFactsGatherer, SystemFacts, SystemFactsGatherer, UnavailableGatherer, WinReInfo,
+    SYSTEM_FACTS_FORMAT_VERSION,
 };
 pub use volume::{sha256_hex, UnlockedVolume, Volume, VolumeHeader, VOLUME_FORMAT_VERSION};

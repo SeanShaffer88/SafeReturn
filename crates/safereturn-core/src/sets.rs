@@ -60,6 +60,11 @@ pub struct SetManifest {
     /// (Live) is the truthful value for all of them.
     #[serde(default)]
     pub capture_mode: CaptureMode,
+    /// System facts section (S3): present on system backup sets,
+    /// absent (the field is omitted entirely) on plain file sets and
+    /// on every pre-S3 manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<crate::system::SystemFacts>,
     pub files: Vec<SetFileEntry>,
     pub skipped: Vec<SkippedEntry>,
 }
@@ -292,6 +297,7 @@ pub fn backup_tree_with_source(
         created_unix,
         roots: display_names,
         capture_mode: source.capture_mode(),
+        system: None,
         files,
         skipped,
     };
@@ -383,6 +389,39 @@ pub fn write_set_manifest(volume: &UnlockedVolume, manifest: &SetManifest) -> Re
     fs::create_dir_all(volume.sets_dir()).map_err(|e| io_at(&volume.sets_dir(), e))?;
     let json = serde_json::to_string_pretty(manifest).unwrap();
     // Temp + rename, like chunks: a crash never leaves a torn manifest.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json).map_err(|e| io_at(&tmp, e))?;
+    fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
+    Ok(())
+}
+
+/// Attach gathered system facts to an existing set (S3). Facts are
+/// validated first; a set that already carries a system section keeps
+/// it — recorded facts are never silently replaced. The manifest is
+/// rewritten with the same temp-file + rename discipline as creation.
+pub fn attach_system_facts(
+    volume: &UnlockedVolume,
+    set_id: &str,
+    facts: crate::system::SystemFacts,
+) -> Result<SetManifest> {
+    facts.validate()?;
+    let mut manifest = read_set_manifest(volume, set_id)?;
+    if manifest.system.is_some() {
+        return Err(CoreError::SystemFactsAlreadyPresent {
+            set_id: set_id.to_string(),
+        });
+    }
+    manifest.system = Some(facts);
+    rewrite_set_manifest(volume, &manifest)?;
+    Ok(manifest)
+}
+
+/// Overwrite an existing set manifest (temp + rename). Only for
+/// engine-internal updates like attaching system facts; creation goes
+/// through `write_set_manifest`, which refuses existing ids.
+fn rewrite_set_manifest(volume: &UnlockedVolume, manifest: &SetManifest) -> Result<()> {
+    let path = set_manifest_path(volume, &manifest.set_id);
+    let json = serde_json::to_string_pretty(manifest).unwrap();
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, json).map_err(|e| io_at(&tmp, e))?;
     fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
