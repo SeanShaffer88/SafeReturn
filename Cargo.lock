@@ -310,6 +310,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "safereturn-shell"
+version = "0.1.0"
+dependencies = [
+ "safereturn-contract",
+ "safereturn-core",
+ "serde",
+]
+
+[[package]]
 name = "safereturn-vss"
 version = "0.1.0"
 

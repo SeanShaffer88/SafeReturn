@@ -1,0 +1,19 @@
+[package]
+name = "safereturn-shell"
+version = "0.1.0"
+edition = "2021"
+
+# The recovery shell's view-model (S6): the pure screen state
+# machine of the WinPE recovery flow. It is a separate crate — not
+# part of safereturn-core (the engine library; presentation logic
+# does not grow inside it) and not part of the Win32 front-end
+# binary (whose code only compiles for Windows, while this flow
+# logic must be testable on every OS in the full local gate).
+# Shells render; the engine decides: this crate sequences screens
+# and renders engine facts via strings-table ids, and contains no
+# backup/restore/safety decisions. See docs/S6_NOTES.md.
+
+[dependencies]
+safereturn-contract = { path = "../safereturn-contract" }
+safereturn-core = { path = "../safereturn-core" }
+serde = { version = "1.0", features = ["derive"] }

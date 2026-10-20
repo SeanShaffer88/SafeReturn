@@ -5,4 +5,5 @@ members = [
     "crates/safereturn-core",
     "crates/safereturn-cli",
     "crates/safereturn-vss",
+    "crates/safereturn-shell",
 ]
