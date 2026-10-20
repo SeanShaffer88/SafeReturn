@@ -1,0 +1,12 @@
+{
+  "kind": "event",
+  "type": "media_planned",
+  "plan_token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "target_disk_id": "disk-2",
+  "target_summary": "Seagate Backup Plus (…X7K2): 16.0 GB device — 590.3 MB boot (FAT32), 15.4 GB data (NTFS)",
+  "erase_warning_id": "media.will_erase_target",
+  "boot_partition_bytes": 590348288,
+  "data_partition_bytes": 16588472320,
+  "payload_bytes": 52428800,
+  "warnings": []
+}

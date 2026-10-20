@@ -1,0 +1,8 @@
+{
+  "kind": "request",
+  "id": 9,
+  "body": {
+    "type": "plan_media",
+    "target_disk_id": "disk-2"
+  }
+}

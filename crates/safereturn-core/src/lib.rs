@@ -33,6 +33,7 @@ pub mod engine;
 pub mod error;
 pub mod hex;
 pub mod media;
+pub mod media_exec;
 pub mod plain;
 pub mod sets;
 pub mod system;
@@ -50,11 +51,15 @@ pub use engine::{
     format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry, FileRehearsalReport,
 };
 pub use media::{
-    plan_media, MediaFacts, MediaLayout, MediaPlan, MediaPlanOptions, MediaStep, MediaTargetFacts,
-    MediaWarning, PayloadFact, WinPeSourceFacts, FAT32_MAX_BYTES, MIN_BOOT_PARTITION_BYTES,
-    MIN_DATA_PARTITION_BYTES, MIN_TARGET_BYTES, PARTITION_ALIGNMENT_BYTES,
-    WINPE_OPTIONAL_COMPONENTS,
+    plan_media, read_media_manifest, write_media_manifest, MediaFacts, MediaLayout, MediaManifest,
+    MediaPlan, MediaPlanOptions, MediaStep, MediaTargetFacts, MediaWarning, PayloadFact,
+    WinPeSourceFacts, FAT32_MAX_BYTES, MEDIA_MANIFEST_FILE, MEDIA_MANIFEST_FORMAT_VERSION,
+    MIN_BOOT_PARTITION_BYTES, MIN_DATA_PARTITION_BYTES, MIN_TARGET_BYTES,
+    PARTITION_ALIGNMENT_BYTES, WINPE_OPTIONAL_COMPONENTS,
 };
+#[cfg(windows)]
+pub use media_exec::WindowsAdkExecutor;
+pub use media_exec::{platform_executor, MediaExecutor, UnsupportedExecutor, MEDIA_LIVE_ENV};
 pub use sets::{
     attach_system_facts, backup_tree, backup_tree_with_source, list_set_ids, list_sets,
     plan_target_states, read_catalog, read_set_manifest, rebuild_catalog, restore_file,

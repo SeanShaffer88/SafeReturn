@@ -444,3 +444,83 @@ fn compute_plan_id(plan: &MediaPlan) -> Result<String> {
     })?;
     Ok(sha256_hex(json.as_bytes()))
 }
+
+// ---------------------------------------------------------------------------
+// Media manifest: written to the media root at build time as
+// `safereturn-media.json`. It is what makes finished media verifiable
+// (media_verify) and what proves, later, exactly which plan — and
+// which warnings — the media was created from.
+
+pub const MEDIA_MANIFEST_FILE: &str = "safereturn-media.json";
+pub const MEDIA_MANIFEST_FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaManifest {
+    pub format_version: u32,
+    /// The plan this media was built from (MediaPlan.plan_id).
+    pub plan_id: String,
+    pub created_unix: u64,
+    /// Version of the SafeReturn core that built the media.
+    pub created_by_version: String,
+    /// Warning ids shown to (and accepted by) the user at create
+    /// time — copied from the confirmed plan, never reconstructed.
+    pub warnings_shown: Vec<String>,
+    pub boot_partition_bytes: u64,
+    pub data_partition_bytes: u64,
+    /// Payload as staged at the media root, with the hashes the
+    /// verifier re-checks.
+    pub payload: Vec<PayloadFact>,
+}
+
+/// Write the manifest for a confirmed plan into `media_root`
+/// (temp file + rename, the same discipline as set manifests: a
+/// crash never leaves a torn manifest).
+pub fn write_media_manifest(
+    media_root: &std::path::Path,
+    plan: &MediaPlan,
+    created_unix: u64,
+) -> Result<MediaManifest> {
+    let manifest = MediaManifest {
+        format_version: MEDIA_MANIFEST_FORMAT_VERSION,
+        plan_id: plan.plan_id.clone(),
+        created_unix,
+        created_by_version: env!("CARGO_PKG_VERSION").to_string(),
+        warnings_shown: plan.warnings.iter().map(|w| w.id().to_string()).collect(),
+        boot_partition_bytes: plan.layout.boot_partition_bytes,
+        data_partition_bytes: plan.layout.data_partition_bytes,
+        payload: plan.facts.payload.clone(),
+    };
+    let path = media_root.join(MEDIA_MANIFEST_FILE);
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| crate::error::io_at(&path, std::io::Error::other(e.to_string())))?;
+    let tmp = media_root.join(format!(".{MEDIA_MANIFEST_FILE}.tmp"));
+    std::fs::write(&tmp, json).map_err(|e| crate::error::io_at(&tmp, e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| crate::error::io_at(&path, e))?;
+    Ok(manifest)
+}
+
+/// Read and schema-check a media manifest. Parse failures and wrong
+/// format versions are MediaManifestInvalid — reported as invalid
+/// data, never mistaken for "no manifest" or a pass.
+pub fn read_media_manifest(media_root: &std::path::Path) -> Result<MediaManifest> {
+    let path = media_root.join(MEDIA_MANIFEST_FILE);
+    if !path.exists() {
+        return Err(CoreError::MediaManifestMissing {
+            path: media_root.to_path_buf(),
+        });
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| crate::error::io_at(&path, e))?;
+    let manifest: MediaManifest =
+        serde_json::from_str(&text).map_err(|e| CoreError::MediaManifestInvalid {
+            reason: format!("{MEDIA_MANIFEST_FILE} is not valid SafeReturn media data: {e}"),
+        })?;
+    if manifest.format_version != MEDIA_MANIFEST_FORMAT_VERSION {
+        return Err(CoreError::MediaManifestInvalid {
+            reason: format!(
+                "media manifest format {} is not supported by this version (expected {})",
+                manifest.format_version, MEDIA_MANIFEST_FORMAT_VERSION
+            ),
+        });
+    }
+    Ok(manifest)
+}

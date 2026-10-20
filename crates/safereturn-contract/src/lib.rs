@@ -66,6 +66,20 @@ pub enum Request {
         backup_id: String,
         paths: Vec<String>,
     },
+    /// Ask the engine to plan recovery-media creation for a target
+    /// disk (S4). Planning erases nothing; the engine answers
+    /// MediaPlanned with the layout, the warnings, and a plan token.
+    PlanMedia {
+        target_disk_id: String,
+    },
+    /// Create recovery media exactly as the MediaPlanned event
+    /// identified by `plan_token` described. Creating media ERASES the
+    /// target device. Tokens are single-use; if the device changed
+    /// after planning, the engine refuses (media.plan_stale) and
+    /// writes nothing.
+    CreateMedia {
+        plan_token: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +143,27 @@ pub struct RestorePlan {
     pub overwrite_count: u64,
 }
 
+/// The engine's answer to PlanMedia (S4): the media layout the user
+/// is being asked to confirm, plus the token that binds CreateMedia
+/// to *this* preview. Creating media erases the target, so
+/// `erase_warning_id` is always present — there is no media plan
+/// without an erase warning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaPlan {
+    pub plan_token: String,
+    pub target_disk_id: String,
+    /// Data summary (model, serial suffix, sizes) — rendered as data
+    /// like DiskInfo.model; flow wording is strings-table copy.
+    pub target_summary: String,
+    pub erase_warning_id: Option<String>,
+    pub boot_partition_bytes: u64,
+    pub data_partition_bytes: u64,
+    pub payload_bytes: u64,
+    /// Strings-table warning ids the user must see before confirming
+    /// (e.g. the non-removable-override record).
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobOutcome {
@@ -155,6 +190,7 @@ pub enum Event {
         backups: Vec<BackupSummary>,
     },
     RestorePlanned(RestorePlan),
+    MediaPlanned(MediaPlan),
     JobStarted {
         job_id: String,
     },

@@ -104,6 +104,41 @@ fn fixtures() -> Vec<(&'static str, WireMessage)> {
             })),
         ),
         (
+            "plan_media",
+            WireMessage::Request {
+                id: 9,
+                body: Request::PlanMedia {
+                    target_disk_id: "disk-2".into(),
+                },
+            },
+        ),
+        (
+            "create_media",
+            WireMessage::Request {
+                id: 10,
+                body: Request::CreateMedia {
+                    plan_token:
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                },
+            },
+        ),
+        (
+            "media_planned",
+            WireMessage::Event(Event::MediaPlanned(MediaPlan {
+                plan_token:
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                target_disk_id: "disk-2".into(),
+                target_summary:
+                    "Seagate Backup Plus (…X7K2): 16.0 GB device — 590.3 MB boot (FAT32), 15.4 GB data (NTFS)"
+                        .into(),
+                erase_warning_id: Some("media.will_erase_target".into()),
+                boot_partition_bytes: 590_348_288,
+                data_partition_bytes: 16_588_472_320,
+                payload_bytes: 52_428_800,
+                warnings: vec![],
+            })),
+        ),
+        (
             "job_finished_failed",
             WireMessage::Event(Event::JobFinished {
                 job_id: "job-1".into(),

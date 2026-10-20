@@ -14,6 +14,13 @@
 //!   described. A changed target makes the plan stale and the restore
 //!   refuses with nothing written. There is no other restore entry point
 //!   in this API, so "execute without a token" is an unknown-token error.
+//! - Media creation follows the same plan discipline (S4):
+//!   `plan_media` computes the layout and returns a token;
+//!   `create_media` consumes it, re-checks the target facts (size,
+//!   removable, serial suffix) against the plan, and only then hands
+//!   the plan to a `MediaExecutor`. Drift refuses with nothing
+//!   written — the device that would be erased must be the device
+//!   the user confirmed.
 //! - Level-2 File Rehearsal restores chosen files plus a deterministic
 //!   pseudo-random sample into a temporary sandbox and compares hashes;
 //!   the sample is reproducible (seeded from the set id), so a rehearsal
@@ -21,13 +28,20 @@
 
 use crate::capture::{CaptureSource, LiveSource};
 use crate::error::{CoreError, Result};
+use crate::media::{
+    plan_media as compute_media_plan, MediaFacts, MediaPlan as CoreMediaPlan, MediaPlanOptions,
+    MediaTargetFacts,
+};
+use crate::media_exec::MediaExecutor;
 use crate::sets::{
     backup_tree_with_source, hash_existing_file, list_sets, read_set_manifest, restore_entries,
     verify_set, BackupOutcome, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport,
     TargetState,
 };
 use crate::volume::UnlockedVolume;
-use safereturn_contract::{BackupSummary, Event, JobOutcome, RestorePlan};
+use safereturn_contract::{
+    BackupSummary, Event, JobOutcome, MediaPlan as ContractMediaPlan, RestorePlan,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -62,10 +76,20 @@ struct PlanState {
     overwrites: HashSet<String>,
 }
 
+/// A media plan awaiting CreateMedia: the computed plan plus the
+/// target facts as they were when the user saw the plan — the
+/// staleness reference. (Media plans are separate from restore plans:
+/// different token namespace, different drift meaning.)
+struct MediaPlanState {
+    plan: CoreMediaPlan,
+    target: MediaTargetFacts,
+}
+
 pub struct Engine {
     volume: UnlockedVolume,
     job_counter: u64,
     plans: HashMap<String, PlanState>,
+    media_plans: HashMap<String, MediaPlanState>,
 }
 
 impl Engine {
@@ -74,6 +98,7 @@ impl Engine {
             volume,
             job_counter: 0,
             plans: HashMap::new(),
+            media_plans: HashMap::new(),
         }
     }
 
@@ -356,6 +381,129 @@ impl Engine {
     /// Forget all outstanding plans (e.g. the shell navigated away).
     pub fn clear_plans(&mut self) {
         self.plans.clear();
+        self.media_plans.clear();
+    }
+
+    // -- Recovery media (S4) ----------------------------------------------
+
+    /// PlanMedia: compute the media plan for the target the facts
+    /// describe. Erases nothing; refusals from planning (too small,
+    /// non-removable without override, missing WinPE source) surface
+    /// as their named errors. On success, emits MediaPlanned with a
+    /// single-use token bound to this exact plan.
+    pub fn plan_media(
+        &mut self,
+        facts: &MediaFacts,
+        options: &MediaPlanOptions,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<ContractMediaPlan> {
+        let core_plan = compute_media_plan(facts, options)?;
+        let token = new_plan_token()?;
+        let summary = ContractMediaPlan {
+            plan_token: token.clone(),
+            target_disk_id: facts.target.disk_id.clone(),
+            target_summary: format!(
+                "{} (…{}): {} device — {} boot (FAT32), {} data (NTFS)",
+                facts.target.model,
+                facts.target.serial_suffix,
+                format_bytes(facts.target.size_bytes),
+                format_bytes(core_plan.layout.boot_partition_bytes),
+                format_bytes(core_plan.layout.data_partition_bytes),
+            ),
+            // Creating media always erases the target — the warning
+            // is part of every media plan, not an edge case.
+            erase_warning_id: Some("media.will_erase_target".to_string()),
+            boot_partition_bytes: core_plan.layout.boot_partition_bytes,
+            data_partition_bytes: core_plan.layout.data_partition_bytes,
+            payload_bytes: core_plan.payload_total_bytes,
+            warnings: core_plan
+                .warnings
+                .iter()
+                .map(|w| w.id().to_string())
+                .collect(),
+        };
+        self.media_plans.insert(
+            token,
+            MediaPlanState {
+                target: facts.target.clone(),
+                plan: core_plan,
+            },
+        );
+        sink(Event::MediaPlanned(summary.clone()));
+        Ok(summary)
+    }
+
+    /// CreateMedia: execute the media plan bound to `plan_token`
+    /// through `executor`. The token is consumed either way. Before
+    /// the executor runs, the target facts are re-checked against
+    /// the plan: if the device that would be erased is not the device
+    /// the user confirmed (size, removable flag, or serial suffix
+    /// changed), the create refuses with MediaPlanStale and the
+    /// executor is never called — nothing is written.
+    pub fn create_media(
+        &mut self,
+        plan_token: &str,
+        current_target: &MediaTargetFacts,
+        executor: &dyn MediaExecutor,
+        sink: &mut dyn FnMut(Event),
+    ) -> Result<CoreMediaPlan> {
+        let state = self
+            .media_plans
+            .remove(plan_token)
+            .ok_or(CoreError::MediaInvalidPlanToken)?;
+        let planned = &state.target;
+        let drift = if current_target.size_bytes != planned.size_bytes {
+            Some(format!(
+                "target size was {} bytes when planned, is {} bytes now",
+                planned.size_bytes, current_target.size_bytes
+            ))
+        } else if current_target.removable != planned.removable {
+            Some(format!(
+                "target removable flag was {} when planned, is {} now",
+                planned.removable, current_target.removable
+            ))
+        } else if current_target.serial_suffix != planned.serial_suffix {
+            Some(format!(
+                "target serial suffix was …{} when planned, is …{} now — a different device may be attached",
+                planned.serial_suffix, current_target.serial_suffix
+            ))
+        } else {
+            None
+        };
+        if let Some(detail) = drift {
+            return Err(CoreError::MediaPlanStale { detail });
+        }
+        let job_id = self.next_job_id();
+        sink(Event::JobStarted {
+            job_id: job_id.clone(),
+        });
+        let mut progress = |done: u64, total: u64| {
+            sink(Event::JobProgress {
+                job_id: job_id.clone(),
+                phase_id: "phase.building_media".to_string(),
+                done,
+                total,
+                unit: "steps".to_string(),
+            });
+        };
+        match executor.execute(&state.plan, &mut progress) {
+            Ok(()) => {
+                sink(Event::JobFinished {
+                    job_id,
+                    outcome: JobOutcome::Succeeded,
+                    summary_id: "result.media_created".to_string(),
+                });
+                Ok(state.plan)
+            }
+            Err(e) => {
+                sink(Event::JobFinished {
+                    job_id,
+                    outcome: JobOutcome::Failed,
+                    summary_id: "result.media_failed".to_string(),
+                });
+                Err(e)
+            }
+        }
     }
 
     // -- Level-2 File Rehearsal ------------------------------------------
