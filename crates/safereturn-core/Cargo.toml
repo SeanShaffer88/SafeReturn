@@ -7,3 +7,14 @@ edition = "2021"
 sha2 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Compression: DEFLATE via miniz_oxide (pure Rust). zstd was the plan's
+# first choice, but the zstd crate builds its C library with cc-rs and
+# fails the repo's mandated `cargo check --target x86_64-pc-windows-msvc`
+# gate from a Linux host (no lib.exe). Chunk records carry a compression
+# algorithm id (zstd = 1 is reserved), so zstd can replace DEFLATE later
+# without a format break. See docs/S1_S2_NOTES.md.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+getrandom = "0.3"
+zeroize = "1"
