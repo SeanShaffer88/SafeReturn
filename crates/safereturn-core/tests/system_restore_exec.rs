@@ -318,9 +318,14 @@ fn unknown_token_and_unsupported_executor_are_typed_errors() {
     assert!(matches!(err, CoreError::SystemRestoreInvalidPlanToken));
     assert_eq!(err.code(), "system_restore.invalid_plan_token");
 
-    // The platform real-disk executor on this OS is the unsupported
-    // one; executing through the engine surfaces the typed error
-    // and finishes the job as failed.
+    // The platform real-disk executor: off Windows it is the
+    // unsupported executor; on Windows it is the gated skeleton,
+    // which refuses because SR_RESTORE_LIVE is not set in the test
+    // environment. Either way the engine surfaces the typed error
+    // and finishes the job as failed. (This assertion is
+    // platform-shaped on purpose — the first version of this test
+    // assumed the non-Windows answer and failed the Windows CI job
+    // while every local gate was green.)
     let summary = engine
         .plan_system_restore(&set_id, &target_facts(), &options(), &mut |_| {})
         .unwrap();
@@ -331,6 +336,12 @@ fn unknown_token_and_unsupported_executor_are_typed_errors() {
             events.push(e)
         })
         .unwrap_err();
+    #[cfg(windows)]
+    assert!(
+        matches!(err, CoreError::SystemRestoreLiveNotEnabled { .. }),
+        "windows skeleton must refuse without SR_RESTORE_LIVE: {err:?}"
+    );
+    #[cfg(not(windows))]
     assert!(matches!(err, CoreError::UnsupportedPlatform { .. }));
     assert!(matches!(
         events.last(),
