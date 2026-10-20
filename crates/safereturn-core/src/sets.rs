@@ -8,6 +8,7 @@
 //! is implemented and tested, because "the catalog can be rebuilt from
 //! the backup drive alone" is a promise the Recovery Rehearsal makes.
 
+use crate::capture::{last_path_segment, CaptureMode, CaptureSource, LiveSource};
 use crate::crypto::random_array;
 use crate::error::{io_at, CoreError, Result};
 use crate::hex;
@@ -54,6 +55,11 @@ pub struct SetManifest {
     /// Display names of the source roots, in the order given. File paths
     /// in this manifest are prefixed with these names.
     pub roots: Vec<String>,
+    /// How this set was captured (S3): read from the live filesystem, or
+    /// from a VSS snapshot. Absent in pre-S3 manifests — serde's default
+    /// (Live) is the truthful value for all of them.
+    #[serde(default)]
+    pub capture_mode: CaptureMode,
     pub files: Vec<SetFileEntry>,
     pub skipped: Vec<SkippedEntry>,
 }
@@ -135,8 +141,10 @@ fn slugify(label: &str) -> String {
 }
 
 fn root_display_name(root: &Path) -> String {
-    root.file_name()
-        .map(|n| slugify(&n.to_string_lossy()))
+    // From the *logical* root string, splitting on both separators: a
+    // logical root may be Windows-style (C:\Users\…) on any host OS.
+    last_path_segment(root)
+        .map(|n| slugify(&n))
         .unwrap_or_else(|| "root".to_string())
 }
 
@@ -154,9 +162,13 @@ struct FoundFile {
     source: PathBuf,
 }
 
-/// Walk the roots and enumerate regular files. Symlinks and non-regular
-/// files are recorded as skipped, never followed and never silent.
+/// Walk the roots (through the capture source) and enumerate regular
+/// files. Symlinks and non-regular files are recorded as skipped, never
+/// followed and never silent. Set paths are built from the *logical*
+/// root only — the resolved (e.g. snapshot device) path is used solely
+/// to open files and never leaks into the manifest.
 fn enumerate(
+    source: &dyn CaptureSource,
     roots: &[PathBuf],
     display_names: &[String],
 ) -> Result<(Vec<FoundFile>, Vec<SkippedEntry>)> {
@@ -164,18 +176,16 @@ fn enumerate(
     let mut skipped = Vec::new();
     for (idx, root) in roots.iter().enumerate() {
         let display = &display_names[idx];
-        let meta = fs::metadata(root).map_err(|e| CoreError::SourceUnreadable {
+        let open_root = source.resolve_root(root)?;
+        let meta = fs::metadata(&open_root).map_err(|e| CoreError::SourceUnreadable {
             path: root.clone(),
             source: e,
         })?;
         if meta.is_file() {
-            let name = root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "file".to_string());
+            let name = last_path_segment(root).unwrap_or_else(|| "file".to_string());
             found.push(FoundFile {
                 set_path: format!("{display}/{name}"),
-                source: root.clone(),
+                source: open_root,
             });
             continue;
         }
@@ -186,7 +196,7 @@ fn enumerate(
             });
             continue;
         }
-        let mut stack = vec![root.clone()];
+        let mut stack = vec![open_root.clone()];
         while let Some(dir) = stack.pop() {
             let mut entries: Vec<PathBuf> = Vec::new();
             for entry in fs::read_dir(&dir).map_err(|e| io_at(&dir, e))? {
@@ -195,7 +205,7 @@ fn enumerate(
             entries.sort();
             for path in entries {
                 let rel = path
-                    .strip_prefix(root)
+                    .strip_prefix(&open_root)
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/");
@@ -227,7 +237,8 @@ fn enumerate(
 }
 
 /// Back up every regular file under `roots` (files or folders) into a new
-/// set on the volume. Progress is called as (files_done, files_total).
+/// set on the volume, reading from the live filesystem. Progress is
+/// called as (files_done, files_total).
 ///
 /// Failure policy: a source file that cannot be read aborts the backup
 /// with `SourceUnreadable` and **no set manifest is written** — chunks
@@ -235,6 +246,21 @@ fn enumerate(
 /// a partial backup never appears as a set.
 pub fn backup_tree(
     volume: &UnlockedVolume,
+    label: &str,
+    roots: &[PathBuf],
+    created_unix: u64,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<BackupOutcome> {
+    backup_tree_with_source(volume, &LiveSource, label, roots, created_unix, progress)
+}
+
+/// Like [`backup_tree`], but reads through a [`CaptureSource`] (S3): the
+/// roots are logical paths, the source resolves what to open, and the
+/// manifest records the source's capture mode. Failure policy identical
+/// to `backup_tree`: an unreadable source aborts with no manifest.
+pub fn backup_tree_with_source(
+    volume: &UnlockedVolume,
+    source: &dyn CaptureSource,
     label: &str,
     roots: &[PathBuf],
     created_unix: u64,
@@ -248,7 +274,7 @@ pub fn backup_tree(
         }
         display_names.push(name);
     }
-    let (found, skipped) = enumerate(roots, &display_names)?;
+    let (found, skipped) = enumerate(source, roots, &display_names)?;
     let total = found.len() as u64;
     let set_id = new_set_id(label, created_unix)?;
     let mut files = Vec::with_capacity(found.len());
@@ -265,6 +291,7 @@ pub fn backup_tree(
         label: label.to_string(),
         created_unix,
         roots: display_names,
+        capture_mode: source.capture_mode(),
         files,
         skipped,
     };

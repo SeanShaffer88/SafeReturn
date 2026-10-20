@@ -94,6 +94,13 @@ pub enum CoreError {
     RootNameCollision {
         name: String,
     },
+    /// A capture root does not lie on the volume a mapped capture
+    /// source serves (or would escape it via ".."): it cannot be read
+    /// from that volume's snapshot.
+    CaptureRootOutsideVolume {
+        root: String,
+        volume: String,
+    },
     /// A restore target file exists with different content and was not in
     /// the approved overwrite set.
     RestoreConflict {
@@ -127,6 +134,7 @@ impl CoreError {
             CoreError::FileNotInSet { .. } => "set.file_not_found",
             CoreError::SourceUnreadable { .. } => "backup.source_unreadable",
             CoreError::RootNameCollision { .. } => "backup.root_name_collision",
+            CoreError::CaptureRootOutsideVolume { .. } => "backup.capture_root_outside_volume",
             CoreError::RestoreConflict { .. } => "restore.conflict",
             CoreError::InvalidPlanToken => "restore.invalid_plan_token",
             CoreError::PlanStale { .. } => "restore.plan_stale",
@@ -191,6 +199,10 @@ impl fmt::Display for CoreError {
             CoreError::RootNameCollision { name } => write!(
                 f,
                 "two of the folders you picked have the same name ({name}), so their files would mix together in the backup. Rename one folder, or back them up in separate runs."
+            ),
+            CoreError::CaptureRootOutsideVolume { root, volume } => write!(
+                f,
+                "cannot capture {root} from a snapshot of {volume}: that folder is not on {volume}. No backup set was saved. Pick folders on {volume}, or run the backup without a snapshot."
             ),
             CoreError::RestoreConflict { path } => write!(
                 f,

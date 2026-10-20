@@ -8,12 +8,16 @@
 //!   Poly1305 key wraps, the recovery-key file format.
 //! - `volume` — the encrypted, self-describing backup volume: header,
 //!   content-addressed chunk records (compress → encrypt → store).
+//! - `capture` — capture sources (S3): the set walk reads through a
+//!   `CaptureSource` — the live filesystem by default, or a prefix-
+//!   mapped snapshot root — and manifests record which one was used.
 //! - `sets` — backup sets and their manifests, Level-1 verify, restore,
 //!   and the manifest-rebuildable catalog.
 //! - `engine` — the shell-contract-facing API: contract events, restore
 //!   plans with single-use plan tokens, Level-2 File Rehearsal.
 //! - `error` — named errors with stable machine codes and fix paths.
 
+pub mod capture;
 pub mod crypto;
 pub mod engine;
 pub mod error;
@@ -28,14 +32,16 @@ pub use error::{ChunkCorruptReason, CoreError, Result};
 pub use plain::{ChunkStore, FileEntry, Manifest, VerifyReport, CHUNK_SIZE};
 
 // Production store surface.
+pub use capture::{CaptureMode, CaptureSource, LiveSource, MappedSource};
 pub use crypto::{KdfParams, VolumeKey, WrappedKey};
 pub use engine::{
     format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry, FileRehearsalReport,
 };
 pub use sets::{
-    backup_tree, list_set_ids, list_sets, plan_target_states, read_catalog, read_set_manifest,
-    rebuild_catalog, restore_file, restore_files, restore_set, summarize, verify_set,
-    BackupOutcome, Catalog, CatalogSet, ChunkFailure, RestoreOutcome, SetFileEntry, SetManifest,
-    SetVerifyReport, SkippedEntry, TargetState, SET_CHUNK_SIZE, SET_FORMAT_VERSION,
+    backup_tree, backup_tree_with_source, list_set_ids, list_sets, plan_target_states,
+    read_catalog, read_set_manifest, rebuild_catalog, restore_file, restore_files, restore_set,
+    summarize, verify_set, BackupOutcome, Catalog, CatalogSet, ChunkFailure, RestoreOutcome,
+    SetFileEntry, SetManifest, SetVerifyReport, SkippedEntry, TargetState, SET_CHUNK_SIZE,
+    SET_FORMAT_VERSION,
 };
 pub use volume::{sha256_hex, UnlockedVolume, Volume, VolumeHeader, VOLUME_FORMAT_VERSION};
