@@ -1,0 +1,26 @@
+[package]
+name = "safereturn-pe-shell"
+version = "0.1.0"
+edition = "2021"
+
+# The WinPE recovery shell binary (S6): a thin native-Win32
+# front-end over the safereturn-shell view-model, talking to the
+# engine in-process through the safereturn-contract message types.
+# The library half (src/lib.rs) is the transport adapter and is
+# platform-agnostic so it is fully testable anywhere; the Win32
+# window code (src/win32*.rs) is cfg(windows) and compile-verified
+# only — running it needs a real WinPE boot (docs/S6_NOTES.md).
+
+[lib]
+name = "safereturn_pe_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "safereturn-pe-shell"
+path = "src/main.rs"
+
+[dependencies]
+safereturn-contract = { path = "../safereturn-contract" }
+safereturn-core = { path = "../safereturn-core" }
+safereturn-shell = { path = "../safereturn-shell" }
+serde_json = "1.0"

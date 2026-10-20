@@ -218,6 +218,11 @@ pub fn text(id: &str) -> Option<&'static str> {
         BODY_INCOMPATIBLE => "This recovery shell and the engine do not match. SafeReturn needs to be repaired or reinstalled; nothing was changed.",
         BODY_EXIT => "You can remove the recovery media and restart the PC. If you restored the whole PC, the restored Windows should start; if it does not, boot this media again and check the restore result.",
 
+        // Error-support ids (used as Event::Error fields, not
+        // screen body ids).
+        "shell.error.nothing_changed" => "Nothing was changed.",
+        "shell.error.unsupported" => "That is not part of the recovery shell. The recovery shell restores and rehearses; backups and media are made on the desktop.",
+
         CONTROL_CONTINUE => "Continue",
         "shell.control.continue.name" => "Continue to choosing a backup",
         "shell.control.continue.tip" => "Go to the list of backups on the backup drive",
