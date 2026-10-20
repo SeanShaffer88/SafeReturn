@@ -1,0 +1,10 @@
+# SafeReturn checks out with LF line endings on every platform.
+# Golden JSON fixtures are compared byte-for-byte in tests; a CRLF
+# checkout on Windows (git autocrlf) made them "drift" in CI run #2
+# even though the content was identical. Pin LF so a fixture's bytes
+# mean the same thing everywhere. Binary files are never touched.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.dll binary
+*.exe binary

@@ -84,9 +84,15 @@ fn golden_fixtures_match_and_roundtrip() {
         if update {
             fs::write(&path, &json).unwrap();
         } else {
-            let expected = fs::read_to_string(&path).unwrap_or_else(|_| {
-                panic!("missing golden fixture {name}.json — run with SR_UPDATE_GOLDEN=1")
-            });
+            let expected = fs::read_to_string(&path)
+                .unwrap_or_else(|_| {
+                    panic!("missing golden fixture {name}.json — run with SR_UPDATE_GOLDEN=1")
+                })
+                // A checkout that converted line endings (CRLF) is not
+                // drift — the repo pins LF via .gitattributes, and this
+                // normalization keeps older clones honest too. (CI run
+                // #2 failed on exactly this: identical JSON, CRLF file.)
+                .replace("\r\n", "\n");
             assert_eq!(expected, json, "golden fixture {name} drifted — if this change is intentional, regenerate and update the C# DTOs");
         }
         let back: WireMessage = serde_json::from_str(&json).unwrap();
