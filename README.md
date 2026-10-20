@@ -31,8 +31,9 @@ facts — last backup time, which rehearsals passed and when — and says
 ## Status
 
 **Pre-alpha.** Architecture, the riskiest technical spike (S0), the
-S1/S2 engine, and the S3 capture layer are done; there is no
-installable product yet. What exists today:
+S1/S2 engine, the S3 capture layer, and the S4 recovery-media
+builder are done; there is no installable product yet. What exists
+today:
 
 - A production encrypted chunk store (`safereturn-core`): content-addressed
   chunks (SHA-256 of the plaintext, dedupe), compressed and encrypted
@@ -49,13 +50,26 @@ installable product yet. What exists today:
   explicit and reasoned). See `docs/S3_NOTES.md`. Honest limit: this
   code has never taken a real snapshot — VSS runtime verification is
   the pending S0.5 on-machine session, listed precisely in those notes.
+- The S4 recovery-media builder: a pure, fully tested **media plan**
+  (two-partition FAT32+NTFS layout computed from stated facts, typed
+  refusals, a non-removable override that is recorded forever),
+  contract messages + an engine create flow with the same plan-token
+  discipline as restore, a Windows ADK executor (`copype`/DISM/
+  `MakeWinPEMedia /bootex`) that refuses to run unless explicitly
+  enabled, a media manifest, cross-platform `verify_media`, and the
+  **boot-test marker**: media reports NOT TESTED YET until a real
+  boot records itself on the stick. See `docs/S4_NOTES.md`. Honest
+  limit: no media has ever been built by this code — execution is
+  compile-verified only, with the on-machine checklist in those
+  notes.
 - An engine API over the shell contract with restore **plan tokens**:
   a restore executes only the exact preview that was confirmed, refuses
   stale plans, and writes nothing on refusal. Plus Level-2 File
   Rehearsal (sandbox restore + byte-compare).
 - A headless CLI (`safereturn-cli`): `init-volume`, `backup` (with
   `--snapshot <VOL>` and `--system-facts <file>`), `list-sets`,
-  `verify`, `restore-set`, `restore-file`, `rehearse-file`.
+  `verify`, `restore-set`, `restore-file`, `rehearse-file`, and
+  `media plan` / `media create` / `media verify`.
 - A VSS requester spike: the documented Windows Volume Shadow Copy sequence
   as a tested state machine, plus a narrow C++ helper that talks to the real
   VSS API (`safereturn-vss`). Compiling that helper on Windows is verified by
@@ -79,6 +93,7 @@ docs/
   S0_FINDINGS.md
   S1_S2_NOTES.md
   S3_NOTES.md
+  S4_NOTES.md
   SHELL_CONTRACT.md
 ```
 
