@@ -34,6 +34,7 @@ pub mod error;
 pub mod hex;
 pub mod media;
 pub mod media_exec;
+pub mod media_verify;
 pub mod plain;
 pub mod sets;
 pub mod system;
@@ -60,6 +61,11 @@ pub use media::{
 #[cfg(windows)]
 pub use media_exec::WindowsAdkExecutor;
 pub use media_exec::{platform_executor, MediaExecutor, UnsupportedExecutor, MEDIA_LIVE_ENV};
+pub use media_verify::{
+    record_boot_test, verify_media, verify_media_roots, BootFileCheck, BootTestMarker,
+    BootTestStatus, MediaVerifyReport, PayloadCheck, BOOT_TEST_MARKER_FILE,
+    BOOT_TEST_MARKER_FORMAT_VERSION, REQUIRED_BOOT_FILES,
+};
 pub use sets::{
     attach_system_facts, backup_tree, backup_tree_with_source, list_set_ids, list_sets,
     plan_target_states, read_catalog, read_set_manifest, rebuild_catalog, restore_file,

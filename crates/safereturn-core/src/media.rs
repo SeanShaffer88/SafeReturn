@@ -324,7 +324,7 @@ fn compute_layout(facts: &MediaFacts) -> Result<(MediaLayout, u64)> {
     ))
 }
 
-fn check_dest_rel(dest_rel: &str) -> Result<()> {
+pub(crate) fn check_dest_rel(dest_rel: &str) -> Result<()> {
     let bad = dest_rel.is_empty()
         || dest_rel.starts_with('/')
         || dest_rel.starts_with('\\')
