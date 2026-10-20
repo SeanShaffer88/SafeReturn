@@ -18,6 +18,11 @@
 //! - `system` — system facts for system sets (S3): boot mode, Secure
 //!   Boot, BitLocker, ESP contents, WinRE, BCD capture status — each
 //!   fact sourced, each unknown explicit and reasoned.
+//! - `media` — recovery-media planning (S4): the pure, computed
+//!   WinPE media plan (two-partition layout, ADK build steps,
+//!   refusals), plus the media manifest, verification, and the
+//!   boot-test marker protocol. Execution lives in `media_exec`
+//!   (Windows-only) behind the engine's plan-token flow.
 //! - `engine` — the shell-contract-facing API: contract events, restore
 //!   plans with single-use plan tokens, Level-2 File Rehearsal.
 //! - `error` — named errors with stable machine codes and fix paths.
@@ -27,6 +32,7 @@ pub mod crypto;
 pub mod engine;
 pub mod error;
 pub mod hex;
+pub mod media;
 pub mod plain;
 pub mod sets;
 pub mod system;
@@ -42,6 +48,12 @@ pub use capture::{CaptureMode, CaptureSource, LiveSource, MappedSource};
 pub use crypto::{KdfParams, VolumeKey, WrappedKey};
 pub use engine::{
     format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry, FileRehearsalReport,
+};
+pub use media::{
+    plan_media, MediaFacts, MediaLayout, MediaPlan, MediaPlanOptions, MediaStep, MediaTargetFacts,
+    MediaWarning, PayloadFact, WinPeSourceFacts, FAT32_MAX_BYTES, MIN_BOOT_PARTITION_BYTES,
+    MIN_DATA_PARTITION_BYTES, MIN_TARGET_BYTES, PARTITION_ALIGNMENT_BYTES,
+    WINPE_OPTIONAL_COMPONENTS,
 };
 pub use sets::{
     attach_system_facts, backup_tree, backup_tree_with_source, list_set_ids, list_sets,

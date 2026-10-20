@@ -124,6 +124,63 @@ pub enum CoreError {
     PlanStale {
         detail: String,
     },
+    /// Media target is under the builder's minimum size (S4).
+    MediaTargetTooSmall {
+        size_bytes: u64,
+        min_bytes: u64,
+    },
+    /// The WinPE image + payload cannot fit the FAT32 boot partition
+    /// ceiling, or the target has no room left for a usable data
+    /// partition after the boot partition is laid out (S4).
+    MediaPayloadTooLarge {
+        needed_bytes: u64,
+        available_bytes: u64,
+    },
+    /// Media target is not removable and the caller did not explicitly
+    /// override. Erasing a fixed disk by accident is the failure this
+    /// refusal exists to prevent (S4).
+    MediaTargetNotRemovable,
+    /// The WinPE source (winpe.wim) the caller named is not there (S4).
+    MediaSourceMissing {
+        detail: String,
+    },
+    /// Media facts failed validation (serial suffix, payload paths,
+    /// driver list) — planning refuses rather than guessing (S4).
+    MediaInvalidFacts {
+        reason: String,
+    },
+    /// Media plan token is unknown, already used, or not a token.
+    MediaInvalidPlanToken,
+    /// The target device changed after the media plan was made (size,
+    /// removable flag, or serial suffix differ at execute time), so
+    /// executing would erase a device other than the one confirmed.
+    MediaPlanStale {
+        detail: String,
+    },
+    /// The directory given for media verification carries no
+    /// safereturn-media.json — it is not SafeReturn media (or the
+    /// wrong partition was picked).
+    MediaManifestMissing {
+        path: PathBuf,
+    },
+    /// The media manifest or boot-test marker exists but is not valid
+    /// data of the expected schema/version. Reported as invalid data,
+    /// never treated as a passing check.
+    MediaManifestInvalid {
+        reason: String,
+    },
+    /// A feature exists only on Windows and this build is running
+    /// somewhere else (media execution, snapshot capture). The typed
+    /// error is the contract: callers render it, never a panic.
+    UnsupportedPlatform {
+        feature: &'static str,
+    },
+    /// On Windows, a live operation (media build, snapshot) was asked
+    /// for but the explicit live-enable environment switch is not set.
+    /// Real hardware operations never start from an ambient call.
+    LiveNotEnabled {
+        env_var: &'static str,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
@@ -151,6 +208,17 @@ impl CoreError {
             CoreError::SystemFactsAlreadyPresent { .. } => "set.system_facts_already_present",
             CoreError::InvalidPlanToken => "restore.invalid_plan_token",
             CoreError::PlanStale { .. } => "restore.plan_stale",
+            CoreError::MediaTargetTooSmall { .. } => "media.target_too_small",
+            CoreError::MediaPayloadTooLarge { .. } => "media.payload_too_large",
+            CoreError::MediaTargetNotRemovable => "media.target_not_removable",
+            CoreError::MediaSourceMissing { .. } => "media.winpe_source_missing",
+            CoreError::MediaInvalidFacts { .. } => "media.invalid_facts",
+            CoreError::MediaInvalidPlanToken => "media.invalid_plan_token",
+            CoreError::MediaPlanStale { .. } => "media.plan_stale",
+            CoreError::MediaManifestMissing { .. } => "media.manifest_missing",
+            CoreError::MediaManifestInvalid { .. } => "media.manifest_invalid",
+            CoreError::UnsupportedPlatform { .. } => "core.unsupported_platform",
+            CoreError::LiveNotEnabled { .. } => "media.live_not_enabled",
         }
     }
 }
@@ -236,6 +304,57 @@ impl fmt::Display for CoreError {
             CoreError::PlanStale { detail } => write!(
                 f,
                 "the files on the target changed after this restore plan was made ({detail}), so the plan no longer matches reality. Nothing was written. Make a new plan to see the current state."
+            ),
+            CoreError::MediaTargetTooSmall {
+                size_bytes,
+                min_bytes,
+            } => write!(
+                f,
+                "this device is too small for recovery media: it has {size_bytes} bytes, and SafeReturn needs at least {min_bytes} bytes (8 GiB) to lay out a WinPE boot partition plus a data partition. Nothing was written to the device. Use a larger USB stick."
+            ),
+            CoreError::MediaPayloadTooLarge {
+                needed_bytes,
+                available_bytes,
+            } => write!(
+                f,
+                "the WinPE image and recovery app do not fit: the layout needs {needed_bytes} bytes but only {available_bytes} bytes are available. Nothing was written to the device. Use a larger device, or remove payload files/drivers and plan again."
+            ),
+            CoreError::MediaTargetNotRemovable => write!(
+                f,
+                "this device is not removable media, so SafeReturn will not erase it for recovery media unless the override is set explicitly. Nothing was written. Pick a USB stick, or set the non-removable override if this really is the device to erase."
+            ),
+            CoreError::MediaSourceMissing { detail } => write!(
+                f,
+                "the WinPE source is missing: {detail}. Nothing was written to the device."
+            ),
+            CoreError::MediaInvalidFacts { reason } => write!(
+                f,
+                "the media facts are not usable: {reason}. Nothing was written to the device. Fix the facts and plan again."
+            ),
+            CoreError::MediaInvalidPlanToken => write!(
+                f,
+                "that media plan is not valid (unknown or already used). Nothing was written to the device. Make a new media plan and confirm it before creating media."
+            ),
+            CoreError::MediaPlanStale { detail } => write!(
+                f,
+                "the target device changed after this media plan was made ({detail}), so the plan no longer describes the device that would be erased. Nothing was written. Make a new media plan for the device as it is now."
+            ),
+            CoreError::MediaManifestMissing { path } => write!(
+                f,
+                "{} does not look like SafeReturn recovery media (no safereturn-media.json). If you pointed at a partition of the media, try the other partition — the manifest lives on the boot (FAT32) partition.",
+                path.display()
+            ),
+            CoreError::MediaManifestInvalid { reason } => write!(
+                f,
+                "the SafeReturn media data is not valid: {reason}. It is reported as invalid, not as a pass. Rebuild the media, or restore safereturn-media.json from a known-good copy."
+            ),
+            CoreError::UnsupportedPlatform { feature } => write!(
+                f,
+                "{feature} only works on Windows — this machine is running something else, so it cannot be done here. Nothing was changed."
+            ),
+            CoreError::LiveNotEnabled { env_var } => write!(
+                f,
+                "live media creation is a real hardware operation and is not enabled: set the {env_var}=1 environment variable to permit it. Nothing was written to any device."
             ),
         }
     }
