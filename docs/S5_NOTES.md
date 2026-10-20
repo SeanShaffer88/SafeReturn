@@ -224,6 +224,21 @@ unsupported executor (`core.unsupported_platform`). The
 SR_RESTORE_* env vars) exercises exactly this skeleton path on a
 real machine.
 
+## CI note
+
+The first final-head CI run (92479e1d) failed the Windows job's
+test step: one new test asserted the *non-Windows* platform
+executor's error (`unsupported_platform`) unconditionally, but on
+Windows the platform executor is the gated skeleton, which refuses
+with `system_restore.live_not_enabled` because SR_RESTORE_LIVE is
+not set in the test environment. Every local gate was green — the
+local windows-target gate *compiles* test targets but cannot run
+them, the same gap S3 hit in compile form. Fixed in 3ce89b55 by
+making the assertion platform-shaped (each platform asserts its
+own executor's refusal); CI is green on both jobs at that head.
+Lesson recorded: any test that touches a `platform_*` factory is
+platform-shaped by definition and must be written that way.
+
 ## Named open items (not guessed)
 
 - Whether `reagentc /enable`, run in WinPE after a `/target`'d
