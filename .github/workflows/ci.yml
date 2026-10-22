@@ -59,4 +59,4 @@ jobs:
         run: cargo test --workspace
 
       - name: Windows-target check
-        run: cargo check --workspace --target x86_64-pc-windows-msvc
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
