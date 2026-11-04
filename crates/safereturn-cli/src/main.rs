@@ -12,8 +12,7 @@
 //! Passphrase sources, in order: `--passphrase <p>` (visible in shell
 //! history — fine for scripts/tests, not recommended interactively),
 //! the SAFERETURN_PASSPHRASE environment variable, or an interactive
-//! prompt. Known limitation of this support CLI: the prompt does not
-//! disable terminal echo.
+//! prompt with console echo disabled.
 
 use safereturn_contract::{Event, JobOutcome, WireMessage};
 use safereturn_core::crypto::{format_recovery_key, parse_recovery_key};
@@ -253,33 +252,41 @@ fn parse_options(args: &[String]) -> std::result::Result<(Vec<String>, Options),
 // ---------------------------------------------------------------------------
 // Credentials + engine setup
 
+mod secret;
+
 fn resolve_passphrase(opts: &Options, confirm: bool) -> std::result::Result<String, String> {
+    resolve_passphrase_with(
+        opts,
+        confirm,
+        std::env::var("SAFERETURN_PASSPHRASE").ok(),
+        secret::prompt,
+    )
+}
+
+fn resolve_passphrase_with(
+    opts: &Options,
+    confirm: bool,
+    environment: Option<String>,
+    mut prompt: impl FnMut(&str) -> Option<String>,
+) -> std::result::Result<String, String> {
     if let Some(p) = &opts.passphrase {
         return Ok(p.clone());
     }
-    if let Ok(p) = std::env::var("SAFERETURN_PASSPHRASE") {
+    if let Some(p) = environment {
         if !p.is_empty() {
             return Ok(p);
         }
     }
-    let p = prompt_line("Backup passphrase: ")
-        .ok_or_else(|| "could not read a passphrase".to_string())?;
+    let p =
+        prompt("Backup passphrase: ").ok_or_else(|| "could not read a passphrase".to_string())?;
     if confirm {
-        let again = prompt_line("Repeat passphrase: ")
+        let again = prompt("Repeat passphrase: ")
             .ok_or_else(|| "could not read a passphrase".to_string())?;
         if p != again {
             return Err("the two passphrases did not match — nothing was created".to_string());
         }
     }
     Ok(p)
-}
-
-fn prompt_line(prompt: &str) -> Option<String> {
-    eprint!("{prompt}");
-    std::io::stderr().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok()?;
-    Some(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
 fn unlock(volume_dir: &str, opts: &Options) -> std::result::Result<UnlockedVolume, CoreError> {
@@ -2208,5 +2215,43 @@ mod tests {
         assert_eq!(fmt_datetime(0), "1970-01-01 00:00 UTC");
         assert_eq!(fmt_datetime(1_700_000_000), "2023-11-14 22:13 UTC");
         assert_eq!(fmt_datetime(1_735_689_600), "2025-01-01 00:00 UTC");
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_sources_precede_secure_prompt() {
+        let mut opts = Options::default();
+        opts.passphrase = Some("flag-secret".into());
+        let no_prompt = |_: &str| -> Option<String> { panic!("unexpected prompt") };
+        assert_eq!(
+            resolve_passphrase_with(&opts, true, Some("env-secret".into()), no_prompt).unwrap(),
+            "flag-secret"
+        );
+        opts.passphrase = None;
+        assert_eq!(
+            resolve_passphrase_with(&opts, true, Some("env-secret".into()), no_prompt).unwrap(),
+            "env-secret"
+        );
+    }
+
+    #[test]
+    fn confirmation_and_failure_do_not_disclose_secrets() {
+        let opts = Options::default();
+        let mut entries = ["first-secret", "second-secret"].into_iter();
+        let error = resolve_passphrase_with(&opts, true, Some(String::new()), |_| {
+            entries.next().map(str::to_owned)
+        })
+        .unwrap_err();
+        assert!(error.contains("did not match"));
+        assert!(!error.contains("secret"));
+        assert!(resolve_passphrase_with(&opts, false, None, |_| None).is_err());
+        assert_eq!(
+            resolve_passphrase_with(&opts, true, None, |_| Some("matched".into())).unwrap(),
+            "matched"
+        );
     }
 }
