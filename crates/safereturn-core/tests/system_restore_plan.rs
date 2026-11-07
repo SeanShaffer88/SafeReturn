@@ -617,3 +617,33 @@ fn esp_listing_drift_is_disclosed() {
         .iter()
         .any(|w| w.id() == "system_restore.esp_facts_mismatch"));
 }
+
+#[test]
+fn unsafe_manifest_paths_and_unrepresentable_sizes_cannot_be_planned() {
+    for path in [
+        "osroot/../../outside",
+        "osroot/Windows/file:stream",
+        "osroot\\escape",
+    ] {
+        let mut files = base_files();
+        files[0].path = path.to_string();
+        let m = manifest(files, Some(uefi_facts()));
+        assert!(matches!(
+            plan_system_restore(&m, &target(256 * GIB), &options()),
+            Err(CoreError::UnsafeRestorePath { .. })
+        ));
+    }
+
+    // The recorded total fits in u64, but an ESP this large plus its
+    // headroom cannot be represented. Refuse instead of wrapping/panicking.
+    let mut files = base_files();
+    for file in &mut files {
+        file.size = 0;
+    }
+    files[4].size = u64::MAX;
+    let m = manifest(files, Some(uefi_facts()));
+    assert!(matches!(
+        plan_system_restore(&m, &target(u64::MAX), &options()),
+        Err(CoreError::SystemRestoreInvalidFacts { .. })
+    ));
+}

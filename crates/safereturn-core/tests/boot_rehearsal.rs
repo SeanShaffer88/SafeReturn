@@ -339,3 +339,23 @@ fn layout_validation_catches_a_broken_plan() {
     assert!(!valid);
     assert!(detail.contains("windows"), "detail: {detail}");
 }
+
+#[test]
+fn boot_rehearsal_will_not_replace_a_previous_record() {
+    let (mut engine, base, set_id) = engine_with_system_set("occupied-record");
+    let staging = base.join("staging");
+    fs::create_dir_all(&staging).unwrap();
+    let record = staging.join(REHEARSAL_RECORD_FILE);
+    fs::write(&record, b"unrelated existing file").unwrap();
+    let mut events = Vec::new();
+    let error = engine
+        .run_boot_rehearsal(&set_id, &target(), &options(), &staging, None, &mut |e| {
+            events.push(e)
+        })
+        .unwrap_err();
+    assert!(matches!(error, CoreError::RestoreConflict { .. }));
+    assert!(events.is_empty(), "the job must refuse before starting");
+    assert_eq!(fs::read(record).unwrap(), b"unrelated existing file");
+    assert!(!staging.join("windows").exists());
+    let _ = fs::remove_dir_all(base);
+}

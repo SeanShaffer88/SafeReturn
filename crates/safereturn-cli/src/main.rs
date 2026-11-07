@@ -320,8 +320,14 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
             "Nothing — the volume was not opened and nothing was written."
         }
         CoreError::VolumeAlreadyExists { .. } => "Nothing — the existing volume is untouched.",
-        CoreError::InvalidPlanToken | CoreError::PlanStale { .. } | CoreError::RestoreConflict { .. } => {
+        CoreError::InvalidPlanToken | CoreError::PlanStale { .. } => {
             "Nothing was restored or overwritten."
+        }
+        CoreError::RestoreConflict { .. }
+        | CoreError::UnsafeRestorePath { .. }
+        | CoreError::UnsafeRestoreDestination { .. }
+        | CoreError::RestoreTargetChanged { .. } => {
+            "The file named in the error was not intentionally replaced; earlier files may already have been restored."
         }
         CoreError::SourceUnreadable { .. }
         | CoreError::BackupVerificationFailed { .. }
@@ -364,7 +370,7 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         CoreError::SystemRestoreExecutorNotReady { .. } => {
             "Nothing was erased. (The executor wrote only its inspection files — the diskpart script and the boot command list.)"
         }
-        _ => "Nothing was changed by this operation.",
+        _ => "The operation may have made partial changes. Review the destination and any job report before retrying.",
     }
 }
 
@@ -2248,6 +2254,35 @@ mod tests {
         let err = CoreError::MediaExecutorNotReady;
         assert!(err.to_string().contains("does not enable media creation"));
         assert!(what_was_not_changed(&err).contains("Nothing was written to any device"));
+    }
+
+    #[test]
+    fn restore_failure_text_does_not_promise_rollback() {
+        for err in [
+            CoreError::RestoreConflict {
+                path: "file".into(),
+            },
+            CoreError::RestoreTargetChanged {
+                path: "file".into(),
+            },
+            CoreError::UnsafeRestoreDestination {
+                path: PathBuf::from("file"),
+                reason: "link".into(),
+            },
+        ] {
+            assert!(
+                what_was_not_changed(&err).contains("earlier files may already have been restored")
+            );
+        }
+        let err = CoreError::Io {
+            path: None,
+            source: std::io::Error::other("disk full"),
+        };
+        assert!(what_was_not_changed(&err).contains("may have made partial changes"));
+        assert!(what_was_not_changed(&CoreError::PlanStale {
+            detail: "changed".into()
+        })
+        .contains("Nothing was restored"));
     }
 }
 

@@ -45,6 +45,7 @@ pub mod media_exec;
 pub mod media_verify;
 pub mod plain;
 pub mod recovery_card;
+mod restore_safety;
 pub mod safe_target;
 pub mod sets;
 pub mod system;

@@ -123,6 +123,24 @@ pub enum CoreError {
     RestoreConflict {
         path: String,
     },
+    /// A recorded path is unsafe or conflicts with another path on a
+    /// Windows-style, case-insensitive filesystem.
+    UnsafeRestorePath {
+        path: String,
+        reason: String,
+    },
+    /// A destination or one of its ancestors is a link, reparse point,
+    /// or an incompatible filesystem object.
+    UnsafeRestoreDestination {
+        path: PathBuf,
+        reason: String,
+    },
+    /// A destination changed after the initial restore preflight or
+    /// while its replacement was being staged. Earlier files may have
+    /// already been restored.
+    RestoreTargetChanged {
+        path: String,
+    },
     /// System facts failed validation: an unknown without a reason, a
     /// fact without a source, an ambiguous BCD capture, or an
     /// unsupported facts format version (S3 honesty schema).
@@ -316,6 +334,9 @@ impl CoreError {
             CoreError::RootNameCollision { .. } => "backup.root_name_collision",
             CoreError::CaptureRootOutsideVolume { .. } => "backup.capture_root_outside_volume",
             CoreError::RestoreConflict { .. } => "restore.conflict",
+            CoreError::UnsafeRestorePath { .. } => "restore.unsafe_path",
+            CoreError::UnsafeRestoreDestination { .. } => "restore.unsafe_destination",
+            CoreError::RestoreTargetChanged { .. } => "restore.target_changed",
             CoreError::InvalidSystemFacts { .. } => "backup.invalid_system_facts",
             CoreError::SystemFactsAlreadyPresent { .. } => "set.system_facts_already_present",
             CoreError::InvalidPlanToken => "restore.invalid_plan_token",
@@ -428,7 +449,20 @@ impl fmt::Display for CoreError {
             ),
             CoreError::RestoreConflict { path } => write!(
                 f,
-                "restore stopped before writing {path}: a different file is already there and it was not in the approved plan. Nothing was overwritten. Make a new restore plan to see the current state."
+                "restore stopped before replacing {path}: an existing file was not approved for replacement. Earlier files may already have been restored. Review the destination and make a new plan."
+            ),
+            CoreError::UnsafeRestorePath { path, reason } => write!(
+                f,
+                "the backup path {path:?} cannot be restored safely: {reason}. No file was written for this path. Try another known-good backup or contact support; do not edit the only copy."
+            ),
+            CoreError::UnsafeRestoreDestination { path, reason } => write!(
+                f,
+                "restore cannot safely use {}: {reason}. Choose a destination without links or conflicting objects. Earlier files may already have been restored.",
+                path.display()
+            ),
+            CoreError::RestoreTargetChanged { path } => write!(
+                f,
+                "restore stopped before replacing {path}: the destination changed during the job. Earlier files may already have been restored. Review the destination and make a new restore plan."
             ),
             CoreError::InvalidSystemFacts { reason } => write!(
                 f,

@@ -9,11 +9,13 @@
 //! - Restores only happen through a **plan**: `plan_restore` shows
 //!   exactly what would be written and which existing files would be
 //!   replaced, and returns a single-use token. `start_restore` requires
-//!   that exact token, consumes it, and — before writing anything —
-//!   re-checks that every target file is still in the state the plan
-//!   described. A changed target makes the plan stale and the restore
-//!   refuses with nothing written. There is no other restore entry point
-//!   in this API, so "execute without a token" is an unknown-token error.
+//!   that exact token, consumes it, and — before the job starts —
+//!   re-checks each target's presence and content hash. A changed target
+//!   makes the plan stale before any restore writes. Targets are checked
+//!   again during the job; a later change stops further writes, but earlier
+//!   files may already have been restored. These checks are not race-free.
+//!   There is no other restore entry point in this API, so "execute without
+//!   a token" is an unknown-token error.
 //! - Media creation follows the same plan discipline (S4):
 //!   `plan_media` computes the layout and returns a token;
 //!   `create_media` consumes it, re-checks the target facts (size,
@@ -35,8 +37,8 @@
 //!   result can be re-run and compared.
 
 use crate::boot_rehearsal::{
-    assemble_report, vm_checklist, write_rehearsal_record, BootRehearsalPlan, BootRehearsalReport,
-    VmFacts,
+    assemble_report, vm_checklist, write_new_rehearsal_record, BootRehearsalPlan,
+    BootRehearsalReport, VmFacts, REHEARSAL_RECORD_FILE,
 };
 use crate::capture::{CaptureSource, LiveSource};
 use crate::error::{CoreError, Result};
@@ -45,20 +47,22 @@ use crate::media::{
     MediaPlanOptions, MediaTargetFacts,
 };
 use crate::media_exec::{MediaExecutor, MEDIA_CREATION_UNAVAILABLE_WARNING_ID};
+use crate::restore_safety::{inspect_directory, join_relative, require_absent_file};
 use crate::safe_target::{
     assess_media_target, assess_system_restore_target, SafeTargetAssessment, SafeTargetContext,
 };
 use crate::sets::{
     backup_tree_with_source_progress, hash_existing_file, list_sets, read_set_manifest,
-    restore_entries, verify_set, BackupOutcome, BackupPhase, RestoreOutcome, SetFileEntry,
-    SetManifest, SetVerifyReport, TargetState,
+    restore_entries, restore_entries_with_snapshots, validate_restore_manifest, verify_set,
+    BackupOutcome, BackupPhase, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport,
 };
 use crate::system_restore::{
     plan_system_restore_checked as compute_system_restore_plan_checked, SystemRestoreOptions,
     SystemRestorePlan as CoreSystemRestorePlan, SystemRestoreTargetFacts,
 };
 use crate::system_restore_exec::{
-    SimulatedDiskExecutor, SystemRestoreExecution, SystemRestoreExecutor,
+    SimulatedDiskExecutor, SystemRestoreExecution, SystemRestoreExecutor, DISKPART_SCRIPT_FILE,
+    RESTORE_LOG_FILE,
 };
 use crate::system_restore_verify::verify_system_restore;
 use crate::volume::UnlockedVolume;
@@ -94,9 +98,9 @@ pub fn format_bytes(bytes: u64) -> String {
 struct PlanState {
     /// Scope: (file entry, exact destination) pairs.
     entries: Vec<(SetFileEntry, PathBuf)>,
-    /// Target state per set path at plan time — staleness reference.
-    states: BTreeMap<String, TargetState>,
-    /// Set paths whose plan-time state was Differs (approved overwrites).
+    /// Exact target content hash (or absence) at plan time — staleness reference.
+    states: BTreeMap<String, Option<String>>,
+    /// Set paths whose plan-time content differed (approved overwrites).
     overwrites: HashSet<String>,
 }
 
@@ -308,12 +312,17 @@ impl Engine {
         sink: &mut dyn FnMut(Event),
     ) -> Result<RestorePlan> {
         let manifest = read_set_manifest(&self.volume, backup_id)?;
+        validate_restore_manifest(&manifest)?;
         let entries = plan_entries(&manifest, target_dir, only_path, backup_id)?;
         let states = states_for_entries(&entries)?;
-        let overwrite_count = states
-            .values()
-            .filter(|s| **s == TargetState::Differs)
-            .count() as u64;
+        let overwrites: HashSet<String> = entries
+            .iter()
+            .filter(|(entry, _)| {
+                matches!(states.get(&entry.path), Some(Some(hash)) if hash != &entry.sha256)
+            })
+            .map(|(entry, _)| entry.path.clone())
+            .collect();
+        let overwrite_count = overwrites.len() as u64;
         let file_count = entries.len() as u64;
         let total_bytes: u64 = entries.iter().map(|(f, _)| f.size).sum();
         let token = new_plan_token()?;
@@ -344,11 +353,6 @@ impl Engine {
             total_bytes,
             overwrite_count,
         };
-        let overwrites: HashSet<String> = states
-            .iter()
-            .filter(|(_, s)| **s == TargetState::Differs)
-            .map(|(p, _)| p.clone())
-            .collect();
         self.plans.insert(
             token,
             PlanState {
@@ -379,9 +383,9 @@ impl Engine {
         for (path, planned) in &plan.states {
             match current.get(path) {
                 Some(now) if now == planned => {}
-                Some(now) => {
+                Some(_) => {
                     return Err(CoreError::PlanStale {
-                        detail: format!("{path} was {planned:?} when planned, is {now:?} now"),
+                        detail: format!("the content or presence of {path} changed"),
                     })
                 }
                 None => {
@@ -405,7 +409,13 @@ impl Engine {
                 unit: "files".to_string(),
             });
         };
-        match restore_entries(volume, &plan.entries, &plan.overwrites, &mut progress) {
+        match restore_entries_with_snapshots(
+            volume,
+            &plan.entries,
+            &plan.overwrites,
+            &plan.states,
+            &mut progress,
+        ) {
             Ok(outcome) => {
                 sink(Event::JobFinished {
                     job_id,
@@ -828,6 +838,15 @@ impl Engine {
     ) -> Result<BootRehearsalReport> {
         let planned = self.plan_boot_rehearsal(backup_id, target, options, staging_dir, vm)?;
         let plan = &planned.restore_plan;
+        // A new rehearsal must not replace a previous report or unrelated
+        // artifacts in a user-selected directory.
+        for name in [
+            REHEARSAL_RECORD_FILE,
+            RESTORE_LOG_FILE,
+            DISKPART_SCRIPT_FILE,
+        ] {
+            require_absent_file(&staging_dir.join(name))?;
+        }
         let job_id = self.next_job_id();
         sink(Event::JobStarted {
             job_id: job_id.clone(),
@@ -848,7 +867,17 @@ impl Engine {
             Ok(_) => None,
             Err(e) => Some(e.to_string()),
         };
-        let verify = verify_system_restore(plan, staging_dir)?;
+        let verify = match verify_system_restore(plan, staging_dir) {
+            Ok(report) => report,
+            Err(error) => {
+                sink(Event::JobFinished {
+                    job_id,
+                    outcome: JobOutcome::Failed,
+                    summary_id: "result.boot_rehearsal_verify_failed".to_string(),
+                });
+                return Err(error);
+            }
+        };
         let report = assemble_report(
             plan,
             staging_dir,
@@ -857,7 +886,14 @@ impl Engine {
             vm,
             now_unix(),
         );
-        write_rehearsal_record(staging_dir, &report)?;
+        if let Err(error) = write_new_rehearsal_record(staging_dir, &report) {
+            sink(Event::JobFinished {
+                job_id,
+                outcome: JobOutcome::Failed,
+                summary_id: "result.boot_rehearsal_verify_failed".to_string(),
+            });
+            return Err(error);
+        }
         sink(Event::JobFinished {
             job_id,
             outcome: if report.passed() {
@@ -890,16 +926,21 @@ impl Engine {
         sink: &mut dyn FnMut(Event),
     ) -> Result<FileRehearsalReport> {
         let manifest = read_set_manifest(&self.volume, set_id)?;
+        validate_restore_manifest(&manifest)?;
         let selected = select_rehearsal_files(&manifest, chosen, sample_count)?;
+        let temp_root = std::env::temp_dir();
+        inspect_directory(&temp_root)?;
+        let sandbox = temp_root.join(format!(
+            "safereturn-rehearsal-{}-{}",
+            std::process::id(),
+            crate::hex::encode(&crate::crypto::random_array::<16>()?)
+        ));
+        // An existing directory or link is never adopted as our sandbox.
+        std::fs::create_dir(&sandbox).map_err(|e| crate::error::io_at(&sandbox, e))?;
         let job_id = self.next_job_id();
         sink(Event::JobStarted {
             job_id: job_id.clone(),
         });
-        let sandbox = std::env::temp_dir().join(format!(
-            "safereturn-rehearsal-{}-{}",
-            std::process::id(),
-            crate::hex::encode(&crate::crypto::random_array::<4>()?)
-        ));
         let total = selected.len() as u64;
         let mut entries = Vec::with_capacity(selected.len());
         for (i, entry) in selected.iter().enumerate() {
@@ -945,33 +986,28 @@ fn plan_entries(
     backup_id: &str,
 ) -> Result<Vec<(SetFileEntry, PathBuf)>> {
     match only_path {
-        None => Ok(manifest
+        None => manifest
             .files
             .iter()
-            .map(|f| (f.clone(), target_dir.join(&f.path)))
-            .collect()),
+            .map(|f| Ok((f.clone(), join_relative(target_dir, &f.path)?)))
+            .collect(),
         Some(p) => {
             let entry = manifest.file(p).ok_or_else(|| CoreError::FileNotInSet {
                 set_id: backup_id.to_string(),
                 path: p.to_string(),
             })?;
             let file_name = p.rsplit('/').next().unwrap_or(p);
-            Ok(vec![(entry.clone(), target_dir.join(file_name))])
+            Ok(vec![(entry.clone(), join_relative(target_dir, file_name)?)])
         }
     }
 }
 
 fn states_for_entries(
     entries: &[(SetFileEntry, PathBuf)],
-) -> Result<BTreeMap<String, TargetState>> {
+) -> Result<BTreeMap<String, Option<String>>> {
     let mut map = BTreeMap::new();
     for (entry, dest) in entries {
-        let state = match hash_existing_file(dest)? {
-            None => TargetState::Absent,
-            Some(h) if h == entry.sha256 => TargetState::Identical,
-            Some(_) => TargetState::Differs,
-        };
-        map.insert(entry.path.clone(), state);
+        map.insert(entry.path.clone(), hash_existing_file(dest)?);
     }
     Ok(map)
 }
@@ -1013,30 +1049,23 @@ fn rehearse_one(
     entry: &SetFileEntry,
     sandbox: &std::path::Path,
 ) -> FileRehearsalEntry {
-    let dest = sandbox.join(&entry.path);
     let fail = |detail: String| FileRehearsalEntry {
         path: entry.path.clone(),
         passed: false,
         detail,
     };
-    // Rebuild the file from its chunks exactly as a restore would.
-    let mut content = Vec::with_capacity(entry.size as usize);
-    for chunk_id in &entry.chunks {
-        match volume.get_chunk(chunk_id) {
-            Ok(bytes) => content.extend_from_slice(&bytes),
-            Err(e) => return fail(format!("could not be restored: {e}")),
-        }
-    }
-    if content.len() as u64 != entry.size {
-        return fail("restored size does not match the backup record".to_string());
-    }
-    if let Some(parent) = dest.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return fail(format!("sandbox write failed: {e}"));
-        }
-    }
-    if let Err(e) = std::fs::write(&dest, &content) {
-        return fail(format!("sandbox write failed: {e}"));
+    let dest = match join_relative(sandbox, &entry.path) {
+        Ok(dest) => dest,
+        Err(e) => return fail(format!("could not be restored: {e}")),
+    };
+    // Exercise the same streaming, verified publication path as file restore.
+    if let Err(e) = restore_entries(
+        volume,
+        &[(entry.clone(), dest.clone())],
+        &HashSet::new(),
+        &mut |_, _| {},
+    ) {
+        return fail(format!("could not be restored: {e}"));
     }
     match hash_existing_file(&dest) {
         Ok(Some(h)) if h == entry.sha256 => FileRehearsalEntry {
