@@ -268,3 +268,39 @@ fn esp_listing_hashes_real_files() {
 
     let _ = fs::remove_dir_all(&base);
 }
+
+#[test]
+fn attaching_facts_rejects_manifest_identity_spoofing_and_preserves_old_temp_name() {
+    let base = tmp("attach-safety");
+    let volume = open_test_volume(&base);
+    let original = make_set(&volume, &base);
+    let manifest_path = volume
+        .root()
+        .join("sets")
+        .join(format!("{}.json", original.set_id));
+    let outside = volume.root().join("outside.json");
+    fs::write(&outside, b"do not overwrite").unwrap();
+    let mut tampered = original.clone();
+    tampered.set_id = "../outside".to_string();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        attach_system_facts(&volume, &original.set_id, sample_facts()),
+        Err(CoreError::InvalidSetManifest { .. })
+    ));
+    assert_eq!(fs::read(&outside).unwrap(), b"do not overwrite");
+
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&original).unwrap(),
+    )
+    .unwrap();
+    let old_temp = manifest_path.with_extension("json.tmp");
+    fs::write(&old_temp, b"unrelated temporary name").unwrap();
+    attach_system_facts(&volume, &original.set_id, sample_facts()).unwrap();
+    assert_eq!(fs::read(old_temp).unwrap(), b"unrelated temporary name");
+    let _ = fs::remove_dir_all(base);
+}

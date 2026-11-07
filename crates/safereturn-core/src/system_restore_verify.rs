@@ -16,7 +16,7 @@
 //! unverified is a truthful report; conflating the two is how a
 //! "successful" restore turns out to be an unbootable disk.
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::sets::hash_existing_file;
 use crate::system::Fact;
 use crate::system_restore::{PartitionRole, SystemRestorePlan, WINRE_IMAGE_DEST_REL};
@@ -112,11 +112,13 @@ pub fn verify_system_restore(
         let path = dest_path(
             &applied_root.join(step.partition.dir_name()),
             &step.dest_rel,
-        );
+        )?;
         let pv = partitions
             .iter_mut()
             .find(|p| p.role == step.partition)
-            .expect("every application targets a layout partition");
+            .ok_or_else(|| CoreError::SystemRestoreInvalidFacts {
+                reason: "an application targets a partition absent from the layout".to_string(),
+            })?;
         pv.files_checked += 1;
         match hash_existing_file(&path)? {
             None => pv.missing.push(step.dest_rel.clone()),
@@ -130,20 +132,17 @@ pub fn verify_system_restore(
     // presence on disk.
     let mut esp_boot_files = Vec::new();
     for required in &plan.required_boot_files {
-        let applied = plan
-            .applications
-            .iter()
-            .find(|a| {
-                a.partition == PartitionRole::Esp && a.dest_rel.eq_ignore_ascii_case(required)
-            })
-            .map(|a| {
-                dest_path(
-                    &applied_root.join(PartitionRole::Esp.dir_name()),
-                    &a.dest_rel,
-                )
-                .exists()
-            })
-            .unwrap_or(false);
+        let applied = if let Some(a) = plan.applications.iter().find(|a| {
+            a.partition == PartitionRole::Esp && a.dest_rel.eq_ignore_ascii_case(required)
+        }) {
+            let path = dest_path(
+                &applied_root.join(PartitionRole::Esp.dir_name()),
+                &a.dest_rel,
+            )?;
+            hash_existing_file(&path)?.is_some()
+        } else {
+            false
+        };
         esp_boot_files.push(EspBootFileCheck {
             path: required.clone(),
             present: applied,
@@ -151,13 +150,11 @@ pub fn verify_system_restore(
     }
 
     let winre_image_present = if plan.partition(PartitionRole::WinRe).is_some() {
-        Some(
-            dest_path(
-                &applied_root.join(PartitionRole::WinRe.dir_name()),
-                WINRE_IMAGE_DEST_REL,
-            )
-            .exists(),
-        )
+        let path = dest_path(
+            &applied_root.join(PartitionRole::WinRe.dir_name()),
+            WINRE_IMAGE_DEST_REL,
+        )?;
+        Some(hash_existing_file(&path)?.is_some())
     } else {
         None
     };

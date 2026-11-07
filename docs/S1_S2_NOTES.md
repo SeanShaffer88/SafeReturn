@@ -4,7 +4,9 @@
 **Status of the whole repo:** pre-alpha. Everything below is implemented and tested on synthetic data; nothing has touched a real Windows system volume yet (see "Not done / not verified").
 
 These are historical slice notes. For current backup completion and Quick
-Check behavior, including important limitations, see `BACKUP_INTEGRITY.md`.
+Check behavior, see `BACKUP_INTEGRITY.md`; for current restore safeguards and
+important limitations, see `RESTORE_SAFETY.md`. The historical descriptions
+below do not establish production readiness.
 
 ---
 
@@ -35,7 +37,7 @@ Check behavior, including important limitations, see `BACKUP_INTEGRITY.md`.
 - **Argon2id** for the passphrase KDF (32 MiB, 3 iterations, 1 lane by default), with salt and parameters stored in the volume header so they can be raised for new volumes without breaking old ones.
 - **Key management**: one random 256-bit volume key encrypts everything. It is stored in `volume.json` wrapped twice — once under an Argon2id-derived key (passphrase), once under the recovery key directly (the recovery key is already 256-bit random, so no KDF). The recovery-key file is plain text (`SAFERETURN RECOVERY KEY` header, grouped hex, volume id, and a 4-byte SHA-256 check code): a mistyped or damaged file is rejected as `BadRecoveryKey` ("the file is damaged"), while a well-formed key for a *different* volume fails as `UnlockFailed`. Authentication failures are deliberately indistinguishable beyond that — no oracle for guessing.
 - **Hex, not base64**, in JSON metadata and the key file: no extra dependency, one canonical form, human-comparable.
-- **Writes are temp-file + rename** for chunks, manifests, and restored files: a crash never leaves a torn file under a valid name.
+- **Writes use staging files** for chunks, manifests, and restored files. The current restore publication rules and the limits on crash/directory durability are described in `RESTORE_SAFETY.md`; power-loss behavior has not been verified.
 
 ## Tests (all in the workspace suite)
 

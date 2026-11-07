@@ -48,7 +48,7 @@
 
 use crate::error::{CoreError, Result};
 use crate::safe_target::SafeTargetAssessment;
-use crate::sets::{SetFileEntry, SetManifest};
+use crate::sets::{validate_restore_manifest, SetFileEntry, SetManifest};
 use crate::system::{BitLockerState, BootMode, Fact};
 use crate::volume::sha256_hex;
 use serde::{Deserialize, Serialize};
@@ -425,8 +425,10 @@ impl SystemRestorePlan {
     }
 }
 
-fn align_up(value: u64, alignment: u64) -> u64 {
-    value.div_ceil(alignment) * alignment
+fn align_up(value: u64, alignment: u64) -> Option<u64> {
+    value
+        .checked_add(alignment - 1)
+        .map(|n| n / alignment * alignment)
 }
 
 fn invalid(reason: String) -> CoreError {
@@ -489,6 +491,7 @@ pub fn plan_system_restore_checked(
     if target.disk_id.trim().is_empty() {
         return Err(invalid("target disk id is empty".to_string()));
     }
+    validate_restore_manifest(manifest)?;
 
     let facts = manifest
         .system
@@ -735,12 +738,18 @@ pub fn plan_system_restore_checked(
     }
 
     // -- Layout math (all computed; sources in size_source fields).
+    let size_overflow = || {
+        invalid(
+            "recorded file sizes and layout allowances are too large to plan safely".to_string(),
+        )
+    };
     let esp_bytes: u64 = esp_entries.iter().map(|e| e.size).sum();
-    let esp_size = align_up(
-        (esp_bytes + ESP_CONTENT_HEADROOM_BYTES).max(ESP_DEFAULT_BYTES),
-        MIB,
-    );
-    let esp_size_source = if esp_bytes + ESP_CONTENT_HEADROOM_BYTES > ESP_DEFAULT_BYTES {
+    let esp_with_headroom = esp_bytes
+        .checked_add(ESP_CONTENT_HEADROOM_BYTES)
+        .ok_or_else(size_overflow)?;
+    let esp_size =
+        align_up(esp_with_headroom.max(ESP_DEFAULT_BYTES), MIB).ok_or_else(size_overflow)?;
+    let esp_size_source = if esp_with_headroom > ESP_DEFAULT_BYTES {
         format!(
             "sized from the ESP contents recorded in the backup ({esp_bytes} bytes) plus a stated 32 MiB headroom for the boot configuration bcdboot writes"
         )
@@ -748,22 +757,27 @@ pub fn plan_system_restore_checked(
         "300 MiB default — Microsoft Learn, \"UEFI/GPT-based hard drive partitions\": the ESP minimum is 200 MB on 512-byte-sector drives and 300 MB on 4K-native drives; the default covers both".to_string()
     };
     let winre_size = if winre_included {
-        align_up(
-            (winre_image_bytes + WINRE_FREE_HEADROOM_BYTES).max(WINRE_MIN_BYTES),
-            MIB,
-        )
+        let with_headroom = winre_image_bytes
+            .checked_add(WINRE_FREE_HEADROOM_BYTES)
+            .ok_or_else(size_overflow)?;
+        align_up(with_headroom.max(WINRE_MIN_BYTES), MIB).ok_or_else(size_overflow)?
     } else {
         0
     };
     let os_bytes: u64 = os_entries.iter().map(|e| e.size).sum();
     let headroom = (os_bytes / 10).max(WINDOWS_HEADROOM_MIN_BYTES);
-    let required_min_bytes = GPT_FRONT_RESERVE_BYTES
-        + esp_size
-        + MSR_BYTES
-        + winre_size
-        + os_bytes
-        + headroom
-        + GPT_END_RESERVE_BYTES;
+    let required_min_bytes = [
+        GPT_FRONT_RESERVE_BYTES,
+        esp_size,
+        MSR_BYTES,
+        winre_size,
+        os_bytes,
+        headroom,
+        GPT_END_RESERVE_BYTES,
+    ]
+    .into_iter()
+    .try_fold(0u64, |sum, n| sum.checked_add(n))
+    .ok_or_else(size_overflow)?;
     if target.size_bytes < required_min_bytes {
         return Err(CoreError::SystemRestoreTargetTooSmall {
             needed_bytes: required_min_bytes,

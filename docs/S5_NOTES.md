@@ -183,7 +183,10 @@ fake disk (`esp/`, `msr/`, `windows/`, `winre/` under one root)
 using the same chunk-rebuilding, hash-verifying restore path file
 restores use — the full flow (token → drift check → application
 from a real encrypted set → recorded post steps) runs in tests on
-any OS. It also writes:
+any OS. Current path checks and their race/alias limitations are described
+in `RESTORE_SAFETY.md`. The simulator refuses to replace existing artifact
+names; use a fresh staging directory for a repeat run. New files and
+artifacts require hard-link support on the staging filesystem. It also writes:
 
 - `safereturn-restore-log.json` — the plan id, target facts,
   warnings, and every post step with status

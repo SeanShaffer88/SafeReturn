@@ -349,3 +349,56 @@ fn unknown_token_and_unsupported_executor_are_typed_errors() {
         if summary_id == "result.system_restore_failed"
     ));
 }
+
+#[test]
+fn simulation_refuses_forged_escape_paths_before_creating_the_staging_tree() {
+    let (engine, base, set_id) = engine_with_system_set("escape");
+    let mut plan = core_plan(&engine, &set_id);
+    let root = base.join("staging");
+    let sentinel = base.join("outside.txt");
+    fs::write(&sentinel, b"do not touch").unwrap();
+    plan.applications[0].dest_rel = "../../outside.txt".to_string();
+    let executor = SimulatedDiskExecutor { root: root.clone() };
+    assert!(matches!(
+        executor.execute(engine.volume(), &plan, &mut |_, _| {}),
+        Err(CoreError::UnsafeRestorePath { .. })
+    ));
+    assert!(matches!(
+        verify_system_restore(&plan, &root),
+        Err(CoreError::UnsafeRestorePath { .. })
+    ));
+    assert!(!root.exists());
+    assert_eq!(fs::read(sentinel).unwrap(), b"do not touch");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn simulation_never_overwrites_existing_artifacts_or_the_old_temp_name() {
+    let (engine, base, set_id) = engine_with_system_set("artifacts");
+    let plan = core_plan(&engine, &set_id);
+    for name in [RESTORE_LOG_FILE, DISKPART_SCRIPT_FILE] {
+        let root = base.join(format!("occupied-{name}"));
+        fs::create_dir_all(&root).unwrap();
+        let existing = root.join(name);
+        fs::write(&existing, b"unrelated artifact").unwrap();
+        let executor = SimulatedDiskExecutor { root: root.clone() };
+        assert!(matches!(
+            executor.execute(engine.volume(), &plan, &mut |_, _| {}),
+            Err(CoreError::RestoreConflict { .. })
+        ));
+        assert_eq!(fs::read(&existing).unwrap(), b"unrelated artifact");
+        assert!(!root.join("windows").exists());
+    }
+    let root = base.join("fresh");
+    fs::create_dir_all(&root).unwrap();
+    let old_temp = root.join("safereturn-restore-log.json.tmp");
+    fs::write(&old_temp, b"unrelated temporary name").unwrap();
+    let executor = SimulatedDiskExecutor { root: root.clone() };
+    executor
+        .execute(engine.volume(), &plan, &mut |_, _| {})
+        .unwrap();
+    assert_eq!(fs::read(old_temp).unwrap(), b"unrelated temporary name");
+    assert!(root.join(RESTORE_LOG_FILE).exists());
+    assert!(root.join(DISKPART_SCRIPT_FILE).exists());
+    let _ = fs::remove_dir_all(base);
+}

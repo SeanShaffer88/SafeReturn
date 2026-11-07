@@ -10,10 +10,11 @@ in the engine, not proof that a Windows PC can be restored or booted.
    and renamed. Existing chunks are reused, not silently replaced.
 2. The engine reads back every chunk reference, including deduplicated ones,
    and checks each assembled file's recorded size and SHA-256. A missing or
-   damaged chunk, inconsistent file, or duplicate set path fails the backup
-   before its manifest is published. The failure identifies an affected chunk
-   and/or file. Chunks already copied may remain as unreferenced pool data;
-   the source files and previous set manifests are not changed.
+   damaged chunk, inconsistent file, unsafe recorded path, duplicate path, or
+   common case/file-directory path collision fails the backup before its
+   manifest is published. The failure identifies an affected chunk and/or
+   file. Chunks already copied may remain as unreferenced pool data; the
+   source files and previous set manifests are not changed.
 3. The new manifest is written to a unique temporary file, flushed, and read
    back against the serialized data before it is renamed into the sets folder.
    If it cannot be written or verified, the job fails instead of reporting a
@@ -33,10 +34,11 @@ unless you have another usable copy.
 
 ## Quick Check
 
-Quick Check is read-only. It rejects unsupported manifest versions, a set ID
-that does not match the manifest, and overflowing recorded totals. It names
-missing, malformed, or corrupt chunks and files with unavailable chunks,
-wrong assembled size/hash, or duplicate paths. The report counts distinct
+Quick Check is read-only. It rejects unsafe set IDs, unsupported manifest
+versions, a set ID that does not match the manifest, and overflowing recorded
+totals. It names missing, malformed, or corrupt chunks and files with
+unavailable chunks, wrong assembled size/hash, unsafe paths, duplicate paths,
+or common case/file-directory path collisions. The report counts distinct
 chunks, while progress counts references processed. Empty files are checked too.
 The core report and ordinary CLI output include individual failures; the
 current `--json` event stream reports job status and progress but does not
@@ -51,7 +53,10 @@ read and matches its recorded file sizes and hashes. It does **not** prove:
   the backup volume.
 - That a live capture was point-in-time consistent; use a VSS snapshot where
   available. Skipped entries are recorded separately in the manifest and
-  reported by the backup command.
+  reported by the backup command. Capture currently normalizes backslashes
+  and uses lossy conversion for non-Unicode names; on non-Windows sources,
+  some original filenames can therefore be recorded under a different name.
+  Do not rely on such names until capture preserves or explicitly rejects them.
 - That EFI, BCD, or WinRE are present, that boot registration works, or that
   the PC can boot. Those are separate, still-unverified recovery checks.
 - That the backup will remain readable later or survive a sudden power loss.

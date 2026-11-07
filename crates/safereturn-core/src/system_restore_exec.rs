@@ -22,7 +22,10 @@
 //!   executor requires SR_RESTORE_LIVE=1 before it even renders.
 
 use crate::error::{io_at, CoreError, Result};
-use crate::sets::{read_set_manifest, restore_entries};
+use crate::restore_safety::{
+    inspect_directory, join_relative, require_absent_file, write_artifact,
+};
+use crate::sets::{read_set_manifest, restore_entries, validate_restore_manifest};
 use crate::system_restore::{
     PartitionFilesystem, PartitionRole, SystemRestorePlan, SystemRestoreTargetFacts,
     SystemRestoreWarning,
@@ -31,7 +34,7 @@ use crate::volume::UnlockedVolume;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Environment switch that permits the Windows executor to be
 /// constructed for a live run. Rendering artifacts (the skeleton's
@@ -233,15 +236,10 @@ pub fn post_step_commands(plan: &SystemRestorePlan) -> Vec<Vec<String>> {
     plan.post_steps.iter().filter_map(|s| s.command()).collect()
 }
 
-/// Join a plan destination ('/'-separated, partition-relative) onto
-/// a base directory, component by component — never by string
-/// concatenation, so the result is a valid path on any OS.
-pub fn dest_path(base: &PathBuf, dest_rel: &str) -> PathBuf {
-    let mut out = base.clone();
-    for part in dest_rel.split('/') {
-        out.push(part);
-    }
-    out
+/// Join a validated, '/'-separated, partition-relative destination onto a
+/// base directory. Unsafe or Windows-ambiguous components are refused.
+pub fn dest_path(base: &Path, dest_rel: &str) -> Result<PathBuf> {
+    join_relative(base, dest_rel)
 }
 
 // ---------------------------------------------------------------------------
@@ -265,9 +263,14 @@ impl SystemRestoreExecutor for SimulatedDiskExecutor {
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<SystemRestoreExecution> {
         let manifest = read_set_manifest(volume, &plan.set_id)?;
+        validate_restore_manifest(&manifest)?;
+        for name in [RESTORE_LOG_FILE, DISKPART_SCRIPT_FILE] {
+            require_absent_file(&self.root.join(name))?;
+        }
+        // Inspect all partition directories before applying any file, and
+        // validate every plan destination before creating any directories.
         for spec in &plan.layout {
-            let dir = self.root.join(spec.role.dir_name());
-            fs::create_dir_all(&dir).map_err(|e| io_at(&dir, e))?;
+            inspect_directory(&self.root.join(spec.role.dir_name()))?;
         }
         let mut entries: Vec<(crate::sets::SetFileEntry, PathBuf)> =
             Vec::with_capacity(plan.applications.len());
@@ -279,14 +282,18 @@ impl SystemRestoreExecutor for SimulatedDiskExecutor {
                     path: step.set_path.clone(),
                 })?
                 .clone();
-            let dest = dest_path(&self.root.join(step.partition.dir_name()), &step.dest_rel);
+            let dest = dest_path(&self.root.join(step.partition.dir_name()), &step.dest_rel)?;
             entries.push((entry, dest));
         }
-        // The fake disk starts blank; identical files already there
-        // (a re-run over the same directory) are counted, different
-        // content is a RestoreConflict — the same honesty rules as a
-        // file restore, by construction (same code path).
+        // Different existing files conflict and identical files can be
+        // reused, as for file restore. Artifact names must be unused; a
+        // repeat simulation needs a fresh staging directory.
         let outcome = restore_entries(volume, &entries, &HashSet::new(), progress)?;
+        for spec in &plan.layout {
+            let dir = self.root.join(spec.role.dir_name());
+            inspect_directory(&dir)?;
+            fs::create_dir_all(&dir).map_err(|e| io_at(&dir, e))?;
+        }
 
         // Record — never run — the post-apply steps, and keep the
         // exact diskpart script beside the log for inspection.
@@ -308,17 +315,14 @@ fn write_restore_artifacts(
     plan: &SystemRestorePlan,
     log: &RestoreLog,
 ) -> Result<()> {
-    fs::create_dir_all(root).map_err(|e| io_at(root, e))?;
     let log_path = root.join(RESTORE_LOG_FILE);
     let json = serde_json::to_string_pretty(log).map_err(|e| CoreError::Json {
         path: log_path.clone(),
         source: e,
     })?;
-    let tmp = log_path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|e| io_at(&tmp, e))?;
-    fs::rename(&tmp, &log_path).map_err(|e| io_at(&log_path, e))?;
+    write_artifact(&log_path, json.as_bytes(), false)?;
     let script_path = root.join(DISKPART_SCRIPT_FILE);
-    fs::write(&script_path, diskpart_script(plan, 0)).map_err(|e| io_at(&script_path, e))?;
+    write_artifact(&script_path, diskpart_script(plan, 0).as_bytes(), false)?;
     Ok(())
 }
 
@@ -396,17 +400,21 @@ impl SystemRestoreExecutor for WindowsDiskExecutor {
                 env_var: RESTORE_LIVE_ENV,
             });
         }
-        fs::create_dir_all(&self.work_dir).map_err(|e| io_at(&self.work_dir, e))?;
         let script_path = self.work_dir.join(DISKPART_SCRIPT_FILE);
-        fs::write(&script_path, diskpart_script(plan, self.disk_index))
-            .map_err(|e| io_at(&script_path, e))?;
         let commands_path = self.work_dir.join("safereturn-restore-commands.json");
+        require_absent_file(&script_path)?;
+        require_absent_file(&commands_path)?;
         let commands = post_step_commands(plan);
         let json = serde_json::to_string_pretty(&commands).map_err(|e| CoreError::Json {
             path: commands_path.clone(),
             source: e,
         })?;
-        fs::write(&commands_path, json).map_err(|e| io_at(&commands_path, e))?;
+        write_artifact(
+            &script_path,
+            diskpart_script(plan, self.disk_index).as_bytes(),
+            false,
+        )?;
+        write_artifact(&commands_path, json.as_bytes(), false)?;
         Err(CoreError::SystemRestoreExecutorNotReady {
             detail: format!(
                 "the diskpart script and boot command lines this plan would run were written to {} for inspection, but this build does not run them against a real disk — partitioning, applying files to raw volumes, and running bcdboot/reagentc are verified in the on-machine restore session first (docs/S5_NOTES.md)",

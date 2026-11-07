@@ -35,6 +35,7 @@
 //! inside the caller-chosen staging directory.
 
 use crate::error::{io_at, CoreError, Result};
+use crate::restore_safety::{inspect_file, write_artifact};
 use crate::system::Fact;
 use crate::system_restore::{PartitionRole, SystemRestorePlan};
 use crate::system_restore_verify::{PartitionVerify, SystemRestoreVerifyReport};
@@ -394,19 +395,31 @@ pub fn assemble_report(
     }
 }
 
-/// Write the rehearsal record (the report) into the staging
-/// directory, atomically (temp file + rename, the repo's rule).
+/// Explicitly write or update a rehearsal record. First-time engine runs
+/// use a separate no-clobber publication; this update path is used when an
+/// operator records the observed VM boot outcome.
 pub fn write_rehearsal_record(staging_dir: &Path, report: &BootRehearsalReport) -> Result<()> {
-    std::fs::create_dir_all(staging_dir).map_err(|e| io_at(&staging_dir.to_path_buf(), e))?;
+    save_rehearsal_record(staging_dir, report, true)
+}
+
+pub(crate) fn write_new_rehearsal_record(
+    staging_dir: &Path,
+    report: &BootRehearsalReport,
+) -> Result<()> {
+    save_rehearsal_record(staging_dir, report, false)
+}
+
+fn save_rehearsal_record(
+    staging_dir: &Path,
+    report: &BootRehearsalReport,
+    replace: bool,
+) -> Result<()> {
     let path = staging_dir.join(REHEARSAL_RECORD_FILE);
     let json = serde_json::to_string_pretty(report).map_err(|e| CoreError::Json {
         path: path.clone(),
         source: e,
     })?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| io_at(&tmp, e))?;
-    std::fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
-    Ok(())
+    write_artifact(&path, json.as_bytes(), replace)
 }
 
 /// Read a rehearsal record back. A missing record is a typed
@@ -414,7 +427,7 @@ pub fn write_rehearsal_record(staging_dir: &Path, report: &BootRehearsalReport) 
 /// invalid data — never a fresh-looking report.
 pub fn read_rehearsal_record(staging_dir: &Path) -> Result<BootRehearsalReport> {
     let path = staging_dir.join(REHEARSAL_RECORD_FILE);
-    if !path.exists() {
+    if !inspect_file(&path)? {
         return Err(CoreError::MediaManifestMissing {
             path: staging_dir.to_path_buf(),
         });
