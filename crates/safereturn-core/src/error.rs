@@ -176,12 +176,16 @@ pub enum CoreError {
     },
     /// Media plan token is unknown, already used, or not a token.
     MediaInvalidPlanToken,
-    /// The target device changed after the media plan was made (size,
-    /// removable flag, or serial suffix differ at execute time), so
-    /// executing would erase a device other than the one confirmed.
+    /// The caller-supplied target facts changed after the media plan
+    /// was made. This comparison alone does not establish physical
+    /// device identity.
     MediaPlanStale {
         detail: String,
     },
+    /// The built-in media executor cannot safely bind its target
+    /// selector to the confirmed physical device. It refuses before
+    /// running commands or writing anything, even when live is enabled.
+    MediaExecutorNotReady,
     /// The directory given for media verification carries no
     /// safereturn-media.json — it is not SafeReturn media (or the
     /// wrong partition was picked).
@@ -324,6 +328,7 @@ impl CoreError {
             CoreError::RecoveryCardInvalidFacts { .. } => "recovery_card.invalid_facts",
             CoreError::MediaInvalidPlanToken => "media.invalid_plan_token",
             CoreError::MediaPlanStale { .. } => "media.plan_stale",
+            CoreError::MediaExecutorNotReady => "media.executor_not_ready",
             CoreError::MediaManifestMissing { .. } => "media.manifest_missing",
             CoreError::MediaManifestInvalid { .. } => "media.manifest_invalid",
             CoreError::UnsupportedPlatform { .. } => "core.unsupported_platform",
@@ -477,7 +482,13 @@ impl fmt::Display for CoreError {
             ),
             CoreError::MediaPlanStale { detail } => write!(
                 f,
-                "the target device changed after this media plan was made ({detail}), so the plan no longer describes the device that would be erased. Nothing was written. Make a new media plan for the device as it is now."
+                "the reported target facts changed after this media plan was made ({detail}), so the plan is stale. Nothing was written. Make a new media plan for the device as it is now."
+            ),
+            CoreError::MediaExecutorNotReady => write!(
+                f,
+                "{} Nothing was written to any device. Setting {}=1 does not enable media creation.",
+                crate::media_exec::MEDIA_CREATION_UNAVAILABLE_MESSAGE,
+                crate::media_exec::MEDIA_LIVE_ENV,
             ),
             CoreError::MediaManifestMissing { path } => write!(
                 f,
@@ -494,7 +505,7 @@ impl fmt::Display for CoreError {
             ),
             CoreError::LiveNotEnabled { env_var } => write!(
                 f,
-                "live media creation is a real hardware operation and is not enabled: set the {env_var}=1 environment variable to permit it. Nothing was written to any device."
+                "live media creation is not enabled because {env_var}=1 is not set. The built-in executor remains disabled even with that setting. Nothing was written to any device."
             ),
             CoreError::SystemRestoreNotASystemSet { set_id } => write!(
                 f,

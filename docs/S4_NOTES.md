@@ -7,11 +7,14 @@ two-partition USB (FAT32 boot + NTFS data), host drivers injected,
 and the boot-test marker that turns "we built it" into "it booted,
 on this date" — or honestly says NOT TESTED YET.
 
-**Status: the planning, contract, verify, and marker halves are
-implemented and tested cross-platform. The actual media build has
-never run.** The Windows executor is compile-verified only; see
-UNVERIFIED at the bottom. CI must never build media (no ADK on
-runners, and building media erases a device).
+**Status: planning, contract, verify, and marker code is tested with
+synthetic data. Actual media creation is disabled.** The Windows
+executor refuses before any command or write, even with
+`SR_MEDIA_LIVE=1`. Its drive selector is not bound to the planned
+physical target or protected-disk checks; an opt-in flag or a matching
+plan token is not a safety proof. No media has been built by this code.
+CI must never build media. See the prerequisites and UNVERIFIED list
+below.
 
 ## What was built
 
@@ -19,11 +22,11 @@ runners, and building media erases a device).
 |---|---|
 | Pure media plan (facts → layout, steps, warnings, typed refusals) | `core/src/media.rs`, tests `media_plan.rs` (10) |
 | Contract: `PlanMedia` / `CreateMedia` / `MediaPlanned` + 3 goldens | `contract`, `docs/SHELL_CONTRACT.md` §5 S4 note |
-| Engine create flow: random single-use token, drift re-check, executor trait | `core/src/engine.rs`, `core/src/media_exec.rs`, tests `media_engine.rs` (6) |
+| Engine create flow: random single-use token, drift re-check, executor trait | `core/src/engine.rs`, `core/src/media_exec.rs`, tests `media_engine.rs` (8) |
 | Media manifest `safereturn-media.json` (write/read) | `core/src/media.rs` |
 | Verify + boot-test marker protocol (host read + PE-side writer) | `core/src/media_verify.rs`, tests `media_verify.rs` (10) |
 | CLI `media plan/create/verify` | `safereturn-cli`, smoke tests (3) |
-| Live media-build entry point (env-gated, `#[ignore]`) | `core/tests/media_live.rs` |
+| Non-destructive Windows executor refusal test | `core/tests/media_live.rs`; cross-platform fence test in `media_exec.rs` |
 
 ## The plan (slice 1)
 
@@ -94,32 +97,26 @@ manifest can list it and the host-side verify can check it).
 
 ## Execution model (slice 2)
 
-Same discipline as restore: the engine issues a random plan token;
-`create_media` consumes it on any attempt, re-checks the target
-facts (size, removable, serial suffix) against the plan-time
-snapshot, and refuses drift as `media.plan_stale` with the executor
-never invoked. Execution goes through the `MediaExecutor` trait:
+The engine issues a random plan token; `create_media` consumes it on
+any attempt and compares **caller-supplied** disk ID, model, size,
+removable flag, and serial suffix with the planned facts. Drift is
+refused as `media.plan_stale` before the executor is called. Matching
+facts do not prove physical identity or detect all device swaps.
 
-- `UnsupportedExecutor` (non-Windows): the typed
-  `core.unsupported_platform` error.
-- `WindowsAdkExecutor` (Windows): renders plan steps to ADK tool
-  invocations — `copype.cmd`, `dism.exe`
-  (`/Mount-Image`, `/Add-Package` neutral + `en-US` cabs,
-  `/Add-Driver` with `/Recurse` for folders, `/Unmount-Image
-  /Commit`), then `MakeWinPEMedia.cmd /UFD /bootex` — and writes
-  `safereturn-media.json` to the finished media. **It refuses unless
-  `SR_MEDIA_LIVE=1`**, so no test, CI job, or stray call can erase a
-  device. A failed tool step stops the build with a named error that
-  warns the target may be partially written.
-- Tests drive the engine with a recording fake executor — the trait
-  is the seam that keeps CI honest.
+Execution goes through `MediaExecutor`:
 
-The CLI is stateless across processes, so its confirmation token is
-the plan's **deterministic plan id**: `media plan` prints it;
-`media create` recomputes the plan from the same flags and refuses
-unless `--plan-token` equals it, after printing the plan and the
-erase warning. Same user-facing guarantee (create executes exactly
-the plan that was shown), adapted to a shell with no session.
+- `UnsupportedExecutor` (non-Windows) returns `core.unsupported_platform`.
+- `WindowsAdkExecutor` always returns `media.executor_not_ready` before
+  preparing files or running any command. The retained ADK/DISM steps
+  are not executed; `SR_MEDIA_LIVE=1` cannot override the fence.
+- Caller-supplied test executors are a seam for simulation; the built-in
+  fence does not make arbitrary custom executors safe.
+
+The CLI's deterministic plan id binds the stated plan facts, **not**
+`--target-spec` to a physical device. `media plan` and its JSON event
+warn that built-in creation is unavailable; `media create` cannot erase
+a device through the built-in executor. Planning and `media verify`
+remain available and do not establish bootability.
 
 ## Manifest, verify, and the boot-test marker (slice 3)
 
@@ -154,6 +151,20 @@ a silent nothing.
 
 ## Named open items (not guessed)
 
+- **Target identity and protected disks:** independently resolve the
+  Windows erase target to the physical disk, bind it to the confirmed
+  preview, and refuse source, backup, system, recovery-media, missing,
+  ambiguous, and changed identities as appropriate. Account for removal,
+  remapping, and replacement throughout the potentially long ADK build,
+  especially immediately before an erase. Full serials or other stable
+  identifiers may be needed internally; a four-character suffix alone
+  is not unique. The current CLI supplies facts and `--target-spec`
+  independently and cannot provide this guarantee.
+- **Independent safety validation:** review the Windows implementation
+  and race handling, test with synthetic identities and failure injection,
+  then validate only in a disposable VM/device session with explicit
+  approval. Do not restore a live test merely by setting an environment
+  variable.
 - **OC cab file names / localized cab layout** in the installed ADK
   (`WinPE_OCs\<Name>.cab`, `WinPE_OCs\en-us\<Name>_en-us.cab`) are
   the documented layout as recorded in the plan doc's research; the
@@ -194,7 +205,9 @@ Everything about real execution. Nothing below has run:
    marker write on FAT32/exFAT-mounted data partitions.
 6. Failure behavior: nearly-full target, non-admin run, ADK
    partially installed, USB removed mid-build.
-7. `media_live.rs` end-to-end (it is the session's checklist in
-   code form; `SR_MEDIA_LIVE=1` + target facts env vars required).
+7. Only after the safety prerequisites above are implemented and
+   reviewed, design and explicitly approve a disposable-device live
+   test. `media_live.rs` is currently a non-destructive refusal test;
+   setting `SR_MEDIA_LIVE=1` cannot enable a media build.
 
 The S0.5 VSS list in `docs/S3_NOTES.md` is unchanged and still open.

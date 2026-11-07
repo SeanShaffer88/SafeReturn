@@ -145,7 +145,7 @@ fn fixtures() -> Vec<(&'static str, WireMessage)> {
                 boot_partition_bytes: 590_348_288,
                 data_partition_bytes: 16_588_472_320,
                 payload_bytes: 52_428_800,
-                warnings: vec![],
+                warnings: vec!["media.creation_unavailable".into()],
             })),
         ),
         (

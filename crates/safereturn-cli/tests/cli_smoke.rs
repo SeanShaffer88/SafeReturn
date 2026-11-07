@@ -570,6 +570,15 @@ fn cli_media_plan_and_create_token_discipline() {
         text.contains("Planning changed nothing"),
         "plan output: {text}"
     );
+    assert!(
+        text.contains("built-in recovery media creation is disabled"),
+        "plan output: {text}"
+    );
+    assert!(
+        text.contains("did not verify the physical device"),
+        "plan output: {text}"
+    );
+    assert!(!text.contains("To create this media"));
     let plan_id = plan_id_of(&text);
 
     // Planning is deterministic: same facts, same plan id.
@@ -591,6 +600,28 @@ fn cli_media_plan_and_create_token_discipline() {
     assert_eq!(v["type"], "media_planned");
     assert_eq!(v["plan_token"], plan_id);
     assert_eq!(v["erase_warning_id"], "media.will_erase_target");
+    assert!(v["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w == "media.creation_unavailable"));
+
+    // The new warning must not hide the pre-existing fixed-disk
+    // override warning in a JSON preview.
+    let mut fixed_args: Vec<&str> = plan_args
+        .iter()
+        .copied()
+        .filter(|arg| *arg != "--removable")
+        .collect();
+    fixed_args.extend(["--override-non-removable", "--json"]);
+    let out = run(&fixed_args);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let fixed: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    let warnings = fixed["warnings"].as_array().unwrap();
+    assert!(warnings
+        .iter()
+        .any(|w| w == "media.target_not_removable_override"));
+    assert!(warnings.iter().any(|w| w == "media.creation_unavailable"));
 
     // Refusals still speak plainly through the CLI.
     let out = run(&[
@@ -676,6 +707,44 @@ fn cli_media_create_off_windows() {
     );
 
     let _ = fs::remove_dir_all(&base);
+}
+
+#[cfg(windows)]
+#[test]
+fn cli_media_create_refuses_unverified_target() {
+    let base = tmp("s4-disabled");
+    let (wim, _) = make_wim(&base);
+    let size = (16 * 1024 * 1024 * 1024u64).to_string();
+    let plan_args = [
+        "media",
+        "plan",
+        "--target-size",
+        size.as_str(),
+        "--removable",
+        "--serial-suffix",
+        "X7K2",
+        "--winpe-wim",
+        wim.as_str(),
+    ];
+    let planned = run(&plan_args);
+    assert!(planned.status.success(), "{}", stderr(&planned));
+    let token = plan_id_of(&stdout(&planned));
+    let mut create = plan_args.to_vec();
+    create[1] = "create";
+    // This is not a valid device selector. Removing the legacy flag
+    // also keeps the test non-destructive if the new fence regresses.
+    create.extend(["--plan-token", &token, "--target-spec", "NOT-A-DEVICE"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_safereturn"))
+        .args(&create)
+        .env_remove("SR_MEDIA_LIVE")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("built-in recovery media creation is disabled"));
+    assert!(stderr(&out).contains("does not enable media creation"));
+    assert!(stderr(&out).contains("Nothing was written to any device"));
+    assert!(!stdout(&out).contains("Media created from plan"));
+    let _ = fs::remove_dir_all(base);
 }
 
 #[test]

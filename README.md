@@ -32,11 +32,10 @@ facts — last backup time, which rehearsals passed and when — and says
 
 ## Status
 
-**Pre-alpha.** Architecture, the riskiest technical spike (S0), the
-S1/S2 engine, the S3 capture layer, the S4 recovery-media
-builder, and the S5 bare-metal restore are done; there is no
-installable product yet. What exists
-today:
+**Pre-alpha.** The S1/S2 engine, S3 capture layer, recovery-media
+planning, and bare-metal restore planning and simulation are implemented
+in part. There is no installable product yet; real media creation and
+whole-disk restore are disabled. What exists today:
 
 - An encrypted chunk store (`safereturn-core`): content-addressed
   chunks (SHA-256 of the plaintext, dedupe), compressed and encrypted
@@ -56,18 +55,13 @@ today:
   explicit and reasoned). See `docs/S3_NOTES.md`. Honest limit: this
   code has never taken a real snapshot — VSS runtime verification is
   the pending S0.5 on-machine session, listed precisely in those notes.
-- The S4 recovery-media builder: a pure, fully tested **media plan**
-  (two-partition FAT32+NTFS layout computed from stated facts, typed
-  refusals, a non-removable override that is recorded forever),
-  contract messages + an engine create flow with the same plan-token
-  discipline as restore, a Windows ADK executor (`copype`/DISM/
-  `MakeWinPEMedia /bootex`) that refuses to run unless explicitly
-  enabled, a media manifest, cross-platform `verify_media`, and the
-  **boot-test marker**: media reports NOT TESTED YET until a real
-  boot records itself on the stick. See `docs/S4_NOTES.md`. Honest
-  limit: no media has ever been built by this code — execution is
-  compile-verified only, with the on-machine checklist in those
-  notes.
+- The S4 recovery-media planner: a pure **media plan** based on stated
+  facts, typed refusals, contract messages, plan tokens, a media manifest,
+  cross-platform `verify_media`, and a **boot-test marker**. The built-in
+  Windows ADK executor is **disabled**, including with `SR_MEDIA_LIVE=1`:
+  its drive selector is not yet bound to the confirmed physical device or
+  protected-disk checks. Planning does not verify physical identity. No
+  media has ever been built by this code; see `docs/S4_NOTES.md`.
 - The S5 bare-metal (whole-PC) restore: a pure, fully tested
   **system-restore plan** (GPT layout — ESP/MSR/Windows/WinRE — with
   every size computed and every default carrying its Microsoft Learn
@@ -93,7 +87,7 @@ today:
 - A headless CLI (`safereturn-cli`): `init-volume`, `backup` (with
   `--snapshot <VOL>` and `--system-facts <file>`), `list-sets`,
   `verify`, `restore-set`, `restore-file`, `rehearse-file`,
-  `media plan` / `media create` / `media verify`, and
+  `media plan` / `media create` (currently refused) / `media verify`, and
   `restore-system plan` / `restore-system execute` (with
   `--simulate <folder>`, the documented test path) /
   `restore-system verify`.

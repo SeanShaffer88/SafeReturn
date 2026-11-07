@@ -8,5 +8,7 @@
   "boot_partition_bytes": 590348288,
   "data_partition_bytes": 16588472320,
   "payload_bytes": 52428800,
-  "warnings": []
+  "warnings": [
+    "media.creation_unavailable"
+  ]
 }

@@ -144,11 +144,10 @@ is replaced by a fresh listing of <dir>.
 
 Recovery media (S4): `media plan` computes the layout for a target from
 the facts you pass (device size, serial suffix, WinPE .wim) and prints
-the plan plus its plan id — planning writes nothing. `media create`
-recomputes the plan from the same flags and only proceeds when
---plan-token matches that plan id exactly; it prints the plan and the
-erase warning first. Creating media ERASES the target device. Real
-creation is Windows-only and additionally requires SR_MEDIA_LIVE=1.
+the plan plus its plan id — planning writes nothing and does not verify
+the physical device. Built-in media creation is disabled in this build
+until the target can be verified and protected drives excluded; setting
+SR_MEDIA_LIVE=1 does not enable it. Creating media would ERASE the target.
 `media verify` checks built media anywhere: payload hashes, boot
 files, and the boot-test marker (fresh media honestly reports
 NOT TESTED YET).
@@ -345,6 +344,7 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         | CoreError::MediaInvalidFacts { .. }
         | CoreError::MediaInvalidPlanToken
         | CoreError::MediaPlanStale { .. }
+        | CoreError::MediaExecutorNotReady
         | CoreError::UnsupportedPlatform { .. }
         | CoreError::LiveNotEnabled { .. } => {
             "Nothing was written to any device — no media was created or erased."
@@ -854,13 +854,13 @@ fn cmd_rehearse(pos: &[String], opts: &Options) -> i32 {
 // ---------------------------------------------------------------------------
 // Recovery media (S4): plan / create / verify.
 //
-// The CLI is stateless between runs, so its confirmation token is the
-// plan's deterministic id: `media plan` prints it, `media create`
-// recomputes the plan from the same flags and refuses unless the
-// supplied --plan-token equals that id. The guarantee the user cares
-// about is identical to the engine's token flow: what gets created is
-// exactly the plan that was printed — different facts, no create.
-// (In-process shells use the engine's random single-use tokens.)
+// The CLI is stateless between runs, so its token is the plan's
+// deterministic id: `media create` recomputes the plan and refuses
+// if the supplied id differs. The target facts are operator-supplied
+// and --target-spec is separate; this comparison cannot verify which
+// physical device would be erased. The built-in Windows executor is
+// therefore disabled even when SR_MEDIA_LIVE=1. In-process shells use
+// the engine's random single-use tokens.
 //
 // The payload defaults to this CLI's own executable staged as
 // safereturn/safereturn.exe when no --payload is given: the media
@@ -1048,7 +1048,14 @@ fn print_media_plan(plan: &MediaPlan, token: &str, json: bool) {
             boot_partition_bytes: plan.layout.boot_partition_bytes,
             data_partition_bytes: plan.layout.data_partition_bytes,
             payload_bytes: plan.payload_total_bytes,
-            warnings: plan.warnings.iter().map(|w| w.id().to_string()).collect(),
+            warnings: plan
+                .warnings
+                .iter()
+                .map(|w| w.id().to_string())
+                .chain(std::iter::once(
+                    MEDIA_CREATION_UNAVAILABLE_WARNING_ID.to_string(),
+                ))
+                .collect(),
         };
         let msg = WireMessage::Event(Event::MediaPlanned(summary));
         println!(
@@ -1085,6 +1092,7 @@ fn print_media_plan(plan: &MediaPlan, token: &str, json: bool) {
             ),
         }
     }
+    println!("WARNING: {MEDIA_CREATION_UNAVAILABLE_MESSAGE}");
     println!("Steps:");
     for (i, step) in plan.steps.iter().enumerate() {
         println!("  {}. {}", i + 1, step.describe());
@@ -1105,9 +1113,7 @@ fn cmd_media_plan(mopts: &MediaOptions) -> i32 {
             let token = plan.plan_id.clone();
             print_media_plan(&plan, &token, mopts.json);
             if !mopts.json {
-                println!(
-                    "Planning changed nothing. To create this media, run media create with the same flags and --plan-token {token}."
-                );
+                println!("Planning changed nothing and did not verify the physical device.");
             }
             EXIT_OK
         }
@@ -2235,6 +2241,13 @@ mod tests {
         assert_eq!(fmt_datetime(0), "1970-01-01 00:00 UTC");
         assert_eq!(fmt_datetime(1_700_000_000), "2023-11-14 22:13 UTC");
         assert_eq!(fmt_datetime(1_735_689_600), "2025-01-01 00:00 UTC");
+    }
+
+    #[test]
+    fn disabled_media_reports_what_was_not_written() {
+        let err = CoreError::MediaExecutorNotReady;
+        assert!(err.to_string().contains("does not enable media creation"));
+        assert!(what_was_not_changed(&err).contains("Nothing was written to any device"));
     }
 }
 
