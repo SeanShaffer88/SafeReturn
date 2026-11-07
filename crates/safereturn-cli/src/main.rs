@@ -324,8 +324,13 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         CoreError::InvalidPlanToken | CoreError::PlanStale { .. } | CoreError::RestoreConflict { .. } => {
             "Nothing was restored or overwritten."
         }
-        CoreError::SourceUnreadable { .. } => {
-            "No backup set was saved. (Chunks already copied stay on the volume as reusable content; no partial set exists.)"
+        CoreError::SourceUnreadable { .. }
+        | CoreError::BackupVerificationFailed { .. }
+        | CoreError::BackupWriteFailed { .. } => {
+            "No new backup set was saved; source files and earlier sets were not changed. Chunks already copied remain on the volume."
+        }
+        CoreError::InvalidSetManifest { .. } => {
+            "The backup was not changed by the check."
         }
         CoreError::CaptureRootOutsideVolume { .. } => {
             "No backup set was saved. (Chunks already copied stay on the volume as reusable content; no partial set exists.)"
@@ -369,7 +374,7 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
 fn phase_label(id: &str) -> &str {
     match id {
         "phase.copying_files" => "Copying files",
-        "phase.checking_backup" => "Checking backup chunks",
+        "phase.checking_backup" => "Checking backup chunks and files",
         "phase.restoring_files" => "Restoring files",
         "phase.file_rehearsal" => "Restoring sample files to a sandbox",
         "phase.building_media" => "Building recovery media",
@@ -702,19 +707,34 @@ fn cmd_verify(pos: &[String], opts: &Options) -> i32 {
                     format_bytes(report.plaintext_bytes)
                 );
                 if report.passed() {
-                    println!(
-                        "Result: every chunk is intact — the backup matches what was written."
-                    );
+                    println!("Result: every referenced chunk is intact, and the recorded file sizes and hashes match.");
+                    println!("This checks the current manifest; it does not authenticate it or test whether the PC can boot.");
                 } else {
-                    println!(
-                        "Result: {} of {} chunks are damaged or missing:",
-                        report.failures.len(),
-                        report.chunks_checked
-                    );
-                    for f in &report.failures {
-                        println!("  DAMAGED chunk {} ({})", f.chunk_id, f.reason);
+                    println!("Result: Quick Check FAILED.");
+                    if !report.failures.is_empty() {
+                        println!(
+                            "{} of {} distinct chunks are damaged or missing:",
+                            report.failures.len(),
+                            report.chunks_checked
+                        );
+                        for f in &report.failures {
+                            println!("  DAMAGED chunk {} ({})", f.chunk_id, f.reason);
+                        }
                     }
-                    println!("Re-run the backup from the original files; if this repeats, the backup drive may be failing.");
+                    if !report.file_failures.is_empty() {
+                        println!("Files with problems:");
+                        for f in &report.file_failures {
+                            let reason = match f.reason.as_str() {
+                                "chunk_unavailable" => "a required chunk could not be read",
+                                "size_mismatch" => "the assembled size differs from the manifest",
+                                "hash_mismatch" => "the assembled hash differs from the manifest",
+                                "duplicate_path" => "the path is listed more than once",
+                                other => other,
+                            };
+                            println!("  {} — {}", f.path, reason);
+                        }
+                    }
+                    println!("Use another verified copy or make a new backup on a healthy volume. Retrying on this volume may reuse damaged chunks. The check changed no backup data.");
                 }
             }
             if report.passed() {

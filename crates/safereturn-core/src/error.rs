@@ -90,6 +90,23 @@ pub enum CoreError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// A newly captured set could not be read back and verified. The
+    /// manifest was not published; chunks already written remain as
+    /// dedupe pool content, and existing chunks are not overwritten.
+    BackupVerificationFailed {
+        detail: String,
+    },
+    /// Writing a new backup failed before its manifest was published.
+    /// Some new chunks may already be present on the volume.
+    BackupWriteFailed {
+        detail: String,
+    },
+    /// A set manifest cannot be interpreted consistently or uses a
+    /// format this version does not understand.
+    InvalidSetManifest {
+        set_id: String,
+        reason: String,
+    },
     /// Two source roots map to the same display name inside a set.
     RootNameCollision {
         name: String,
@@ -289,6 +306,9 @@ impl CoreError {
             CoreError::SetAlreadyExists { .. } => "set.already_exists",
             CoreError::FileNotInSet { .. } => "set.file_not_found",
             CoreError::SourceUnreadable { .. } => "backup.source_unreadable",
+            CoreError::BackupVerificationFailed { .. } => "backup.verification_failed",
+            CoreError::BackupWriteFailed { .. } => "backup.write_failed",
+            CoreError::InvalidSetManifest { .. } => "set.invalid_manifest",
             CoreError::RootNameCollision { .. } => "backup.root_name_collision",
             CoreError::CaptureRootOutsideVolume { .. } => "backup.capture_root_outside_volume",
             CoreError::RestoreConflict { .. } => "restore.conflict",
@@ -363,7 +383,7 @@ impl fmt::Display for CoreError {
             ),
             CoreError::ChunkCorrupt { chunk_id, reason } => write!(
                 f,
-                "part of the backup is damaged (chunk {chunk_id}: {reason}). The stored data no longer matches what was written. Re-run the backup from the original files; if this repeats, the drive may be failing."
+                "part of the backup is damaged (chunk {chunk_id}: {reason}). Use another verified backup, or back up the original files to a healthy volume. Retrying on this volume may reuse the damaged chunk."
             ),
             CoreError::SetNotFound { set_id } => write!(
                 f,
@@ -380,6 +400,18 @@ impl fmt::Display for CoreError {
                 f,
                 "could not read {} during backup: {source}. The backup was stopped and no backup set was saved. Close programs that may be using the file, then run the backup again.",
                 path.display()
+            ),
+            CoreError::BackupVerificationFailed { detail } => write!(
+                f,
+                "the new backup could not be read back successfully: {detail}. No new backup set was saved. Try a different healthy backup volume, or restore the damaged data from another verified copy; retrying on this volume alone may reuse the same damaged chunk."
+            ),
+            CoreError::BackupWriteFailed { detail } => write!(
+                f,
+                "the new backup could not be written: {detail}. No new backup set was saved. Check the backup drive connection, free space and permissions, then try again."
+            ),
+            CoreError::InvalidSetManifest { set_id, reason } => write!(
+                f,
+                "the manifest for backup set {set_id} is invalid or unsupported: {reason}. Do not rely on this backup; try another known-good copy or a newer version of SafeReturn."
             ),
             CoreError::RootNameCollision { name } => write!(
                 f,

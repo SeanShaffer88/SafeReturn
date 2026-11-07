@@ -276,7 +276,7 @@ fn cli_end_to_end() {
     // verify passes
     let out = run_pw(&["verify", &volume_s, &set_id]);
     assert!(out.status.success(), "verify failed: {}", stderr(&out));
-    assert!(stdout(&out).contains("every chunk is intact"));
+    assert!(stdout(&out).contains("every referenced chunk is intact"));
 
     // wrong passphrase fails loudly
     let out = run(&["list-sets", &volume_s, "--passphrase", "nope"]);
@@ -753,4 +753,73 @@ fn cli_media_verify_reports_facts_and_names_tampering() {
     assert!(text.contains("Integrity: FAIL"), "stdout: {text}");
 
     let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn cli_reports_file_assembly_damage_and_refuses_corrupt_dedupe() {
+    let base = tmp("integrity");
+    let source = base.join("docs");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("important.txt"), b"irreplaceable data").unwrap();
+    let volume = base.join("volume");
+    let volume_s = volume.to_string_lossy().into_owned();
+    let source_s = source.to_string_lossy().into_owned();
+    let key_s = base.join("key.txt").to_string_lossy().into_owned();
+    let out = run(&[
+        "init-volume",
+        &volume_s,
+        "--recovery-key-out",
+        &key_s,
+        "--passphrase",
+        "smoke-test-pw",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run_pw(&["backup", &volume_s, "first", &source_s]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let set_id = extract_set_id(&stdout(&out));
+    let manifest_path = volume.join("sets").join(format!("{set_id}.json"));
+    let original = fs::read(&manifest_path).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    let chunk = manifest["files"][0]["chunks"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Every individual chunk is intact, but the recorded whole-file hash
+    // is wrong. Quick Check must name the file and fail rather than pass.
+    manifest["files"][0]["sha256"] = "0".repeat(64).into();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let out = run_pw(&["verify", &volume_s, &set_id]);
+    assert!(!out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("Quick Check FAILED"), "{text}");
+    assert!(text.contains("docs/important.txt"), "{text}");
+    assert!(text.contains("assembled hash differs"), "{text}");
+    assert!(text.contains("check changed no backup data"), "{text}");
+    fs::write(&manifest_path, original).unwrap();
+
+    // A second backup would dedupe the damaged chunk. It must fail and
+    // leave the original manifest and source file in place.
+    let chunk_path = volume.join("chunks").join(&chunk[..2]).join(&chunk);
+    let mut bytes = fs::read(&chunk_path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&chunk_path, bytes).unwrap();
+    let out = run_pw(&["backup", &volume_s, "second", &source_s]);
+    assert!(!out.status.success());
+    assert!(!stdout(&out).contains("Backup finished."));
+    let err = stderr(&out);
+    assert!(err.contains(&chunk), "{err}");
+    assert!(err.contains("No new backup set was saved"), "{err}");
+    assert!(err.contains("earlier sets were not changed"), "{err}");
+    assert_eq!(fs::read_dir(volume.join("sets")).unwrap().count(), 1);
+    assert_eq!(
+        fs::read(source.join("important.txt")).unwrap(),
+        b"irreplaceable data"
+    );
+    let _ = fs::remove_dir_all(base);
 }

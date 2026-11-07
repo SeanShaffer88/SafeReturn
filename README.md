@@ -9,10 +9,12 @@ it can bring your PC back. SafeReturn is built around that proof.
 
 ## The standout: Recovery Rehearsal
 
-Recovery you can understand and **test before a crisis**, in four levels:
+Recovery you can understand and **test before a crisis**, planned in four
+levels. These are product goals, not a claim that every level is complete:
 
-1. **Quick Check** — every chunk of the backup is re-hashed; boot components
-   (EFI / BCD / WinRE) are confirmed present.
+1. **Quick Check** — every referenced chunk is re-hashed and the recorded
+   files are checked for size and hash consistency. Boot-component checks
+   (EFI / BCD / WinRE) are planned, not currently part of this check.
 2. **File Rehearsal** — files you choose (plus a random sample) are restored
    to a sandbox folder and verified byte-for-byte.
 3. **Boot Rehearsal** — the backup is restored to a virtual disk and actually
@@ -36,13 +38,16 @@ builder, and the S5 bare-metal restore are done; there is no
 installable product yet. What exists
 today:
 
-- A production encrypted chunk store (`safereturn-core`): content-addressed
+- An encrypted chunk store (`safereturn-core`): content-addressed
   chunks (SHA-256 of the plaintext, dedupe), compressed and encrypted
   per-chunk (XChaCha20-Poly1305), volumes unlocked by an Argon2id
-  passphrase or a recovery-key file, multi-folder backup sets with
-  manifests stored on the volume, Level-1 verify that names damaged
-  chunks, and a catalog that rebuilds from the manifests alone. See
-  `docs/S1_S2_NOTES.md`.
+  passphrase or a recovery-key file, multi-folder backup sets, and a
+  catalog that rebuilds from their manifests. Before publishing a new
+  set, the engine re-reads its new **and reused** chunks and checks each
+  file's recorded size and hash. Quick Check names damaged chunks and
+  inconsistent files. The manifests are plaintext and unauthenticated;
+  these checks cannot prove a manifest has not been altered or entries
+  removed. See `docs/BACKUP_INTEGRITY.md` and `docs/S1_S2_NOTES.md`.
 - The S3 capture layer: backups read through a **capture source** — the
   live filesystem by default, or a VSS snapshot via a prefix-mapped
   source — and every set manifest records which (`capture_mode`), plus
@@ -110,8 +115,11 @@ crates/
   safereturn-core/       Encrypted chunk store, sets, verify, engine API, rehearsals
   safereturn-cli/        Headless CLI (init-volume, backup, verify, restore, rehearse)
   safereturn-vss/        VSS requester state machine + C++ helper (cpp/)
+  safereturn-shell/      Recovery flow view-model
+  safereturn-pe-shell/   WinPE adapter and native shell (runtime unverified)
 docs/
   ARCHITECTURE_AND_UX_PLAN.md
+  BACKUP_INTEGRITY.md
   S0_FINDINGS.md
   S1_S2_NOTES.md
   S3_NOTES.md
@@ -133,7 +141,7 @@ Windows-target compile check (works from Linux/macOS with the target
 installed via `rustup target add x86_64-pc-windows-msvc`):
 
 ```sh
-cargo check --workspace --target x86_64-pc-windows-msvc
+cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 ```
 
 The C++ VSS helper (`crates/safereturn-vss/cpp/vss_helper.cpp`) builds only on
