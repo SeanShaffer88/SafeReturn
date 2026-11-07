@@ -72,11 +72,11 @@ pub enum Request {
     PlanMedia {
         target_disk_id: String,
     },
-    /// Create recovery media exactly as the MediaPlanned event
-    /// identified by `plan_token` described. Creating media ERASES the
-    /// target device. Tokens are single-use; if the device changed
-    /// after planning, the engine refuses (media.plan_stale) and
-    /// writes nothing.
+    /// Request creation from the plan identified by `plan_token`.
+    /// Creating media would ERASE the target device. Tokens are
+    /// single-use; changes in supplied target facts refuse as
+    /// media.plan_stale. Matching facts do not prove device identity;
+    /// the built-in executor currently refuses all live creation.
     CreateMedia {
         plan_token: String,
     },
@@ -178,8 +178,8 @@ pub struct MediaPlan {
     pub boot_partition_bytes: u64,
     pub data_partition_bytes: u64,
     pub payload_bytes: u64,
-    /// Strings-table warning ids the user must see before confirming
-    /// (e.g. the non-removable-override record).
+    /// Strings-table warning ids the user must see (e.g. the
+    /// non-removable override or unavailable built-in creation).
     pub warnings: Vec<String>,
 }
 

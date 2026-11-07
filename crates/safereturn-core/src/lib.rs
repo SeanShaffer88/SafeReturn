@@ -21,8 +21,8 @@
 //! - `media` — recovery-media planning (S4): the pure, computed
 //!   WinPE media plan (two-partition layout, ADK build steps,
 //!   refusals), plus the media manifest, verification, and the
-//!   boot-test marker protocol. Execution lives in `media_exec`
-//!   (Windows-only) behind the engine's plan-token flow.
+//!   boot-test marker protocol. The built-in Windows executor in
+//!   `media_exec` refuses live creation until target safety is proven.
 //! - `system_restore` — bare-metal restore planning (S5): the pure,
 //!   computed whole-PC restore plan (GPT layout with sourced
 //!   defaults, per-partition file application, bcdboot/reagentc
@@ -82,7 +82,10 @@ pub use media::{
 };
 #[cfg(windows)]
 pub use media_exec::WindowsAdkExecutor;
-pub use media_exec::{platform_executor, MediaExecutor, UnsupportedExecutor, MEDIA_LIVE_ENV};
+pub use media_exec::{
+    platform_executor, MediaExecutor, UnsupportedExecutor, MEDIA_CREATION_UNAVAILABLE_MESSAGE,
+    MEDIA_CREATION_UNAVAILABLE_WARNING_ID, MEDIA_LIVE_ENV,
+};
 pub use media_verify::{
     record_boot_test, verify_media, verify_media_roots, BootFileCheck, BootTestMarker,
     BootTestStatus, MediaVerifyReport, PayloadCheck, BOOT_TEST_MARKER_FILE,

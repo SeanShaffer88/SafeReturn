@@ -65,6 +65,9 @@ pub const BODY_STALE: &str = "shell.stale.body";
 pub const BODY_ERROR_WHAT_NOT_CHANGED: &str = "shell.error.what_was_not_changed";
 pub const BODY_INCOMPATIBLE: &str = "shell.error.incompatible";
 pub const BODY_EXIT: &str = "shell.exit.body";
+/// Core-owned warning carried by media previews, including JSON clients.
+pub const WARNING_MEDIA_CREATION_UNAVAILABLE: &str =
+    safereturn_core::MEDIA_CREATION_UNAVAILABLE_WARNING_ID;
 
 // -- Controls ----------------------------------------------------------------
 // Every control has a label id, an accessible-name id, and a
@@ -146,6 +149,7 @@ pub const ALL_IDS: &[&str] = &[
     BODY_ERROR_WHAT_NOT_CHANGED,
     BODY_INCOMPATIBLE,
     BODY_EXIT,
+    WARNING_MEDIA_CREATION_UNAVAILABLE,
     CONTROL_CONTINUE,
     CONTROL_BACK,
     CONTROL_EXIT,
@@ -217,6 +221,7 @@ pub fn text(id: &str) -> Option<&'static str> {
         BODY_ERROR_WHAT_NOT_CHANGED => "What was not changed: {0}",
         BODY_INCOMPATIBLE => "This recovery shell and the engine do not match. SafeReturn needs to be repaired or reinstalled; nothing was changed.",
         BODY_EXIT => "You can remove the recovery media and restart the PC. If you restored the whole PC, the restored Windows should start; if it does not, boot this media again and check the restore result.",
+        WARNING_MEDIA_CREATION_UNAVAILABLE | "media.executor_not_ready" => safereturn_core::MEDIA_CREATION_UNAVAILABLE_MESSAGE,
 
         // Error-support ids (used as Event::Error fields, not
         // screen body ids).

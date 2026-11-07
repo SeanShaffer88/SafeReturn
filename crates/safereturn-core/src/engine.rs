@@ -44,7 +44,7 @@ use crate::media::{
     plan_media_checked as compute_media_plan_checked, MediaFacts, MediaPlan as CoreMediaPlan,
     MediaPlanOptions, MediaTargetFacts,
 };
-use crate::media_exec::MediaExecutor;
+use crate::media_exec::{MediaExecutor, MEDIA_CREATION_UNAVAILABLE_WARNING_ID};
 use crate::safe_target::{
     assess_media_target, assess_system_restore_target, SafeTargetAssessment, SafeTargetContext,
 };
@@ -502,6 +502,9 @@ impl Engine {
                 .iter()
                 .map(|w| w.id().to_string())
                 .chain(core_plan.safety_acknowledgments.iter().cloned())
+                .chain(std::iter::once(
+                    MEDIA_CREATION_UNAVAILABLE_WARNING_ID.to_string(),
+                ))
                 .collect(),
         };
         self.media_plans.insert(
@@ -517,11 +520,11 @@ impl Engine {
 
     /// CreateMedia: execute the media plan bound to `plan_token`
     /// through `executor`. The token is consumed either way. Before
-    /// the executor runs, the target facts are re-checked against
-    /// the plan: if the device that would be erased is not the device
-    /// the user confirmed (size, removable flag, or serial suffix
-    /// changed), the create refuses with MediaPlanStale and the
-    /// executor is never called — nothing is written.
+    /// the executor runs, all caller-supplied target facts are compared
+    /// with the plan; any drift refuses with MediaPlanStale before the
+    /// executor is called. Matching facts are not proof of physical
+    /// identity. The built-in Windows executor independently refuses
+    /// all live creation until it can bind and protect the real target.
     pub fn create_media(
         &mut self,
         plan_token: &str,
@@ -549,6 +552,10 @@ impl Engine {
                 "target serial suffix was …{} when planned, is …{} now — a different device may be attached",
                 planned.serial_suffix, current_target.serial_suffix
             ))
+        } else if current_target.disk_id != planned.disk_id {
+            Some("target disk identifier changed — a different device may be attached".to_string())
+        } else if current_target.model != planned.model {
+            Some("target model changed — a different device may be attached".to_string())
         } else {
             None
         };

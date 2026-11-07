@@ -105,6 +105,9 @@ fn plan_then_create_executes_the_confirmed_plan_once() {
     );
     assert_eq!(summary.target_disk_id, "disk-3");
     assert_eq!(summary.boot_partition_bytes, 563 * MIB);
+    assert!(summary
+        .warnings
+        .contains(&MEDIA_CREATION_UNAVAILABLE_WARNING_ID.to_string()));
 
     let exec = RecordingExecutor::new();
     let mut events = Vec::new();
@@ -235,4 +238,83 @@ fn planning_refusals_pass_through_the_engine() {
         .plan_media(&f, &Default::default(), &mut |_| {})
         .unwrap_err();
     assert!(matches!(err, CoreError::MediaTargetNotRemovable));
+}
+
+#[test]
+fn every_reported_target_identity_change_invalidates_the_plan() {
+    let (mut engine, _base) = tmp_engine();
+    let f = facts();
+    let exec = RecordingExecutor::new();
+
+    let mut different_id = f.target.clone();
+    different_id.disk_id = "disk-9".into();
+    let mut different_model = f.target.clone();
+    different_model.model = "A different USB device".into();
+    let mut different_removable = f.target.clone();
+    different_removable.removable = false;
+
+    // Size and serial suffix remain the same in every case. They are
+    // not unique enough to identify a device on their own.
+    for (label, changed) in [
+        ("disk identifier", different_id),
+        ("model", different_model),
+        ("removable flag", different_removable),
+    ] {
+        let summary = engine
+            .plan_media(&f, &Default::default(), &mut |_| {})
+            .unwrap();
+        let mut events = Vec::new();
+        let err = engine
+            .create_media(&summary.plan_token, &changed, &exec, &mut |e| {
+                events.push(e)
+            })
+            .unwrap_err();
+        assert!(matches!(err, CoreError::MediaPlanStale { .. }));
+        assert!(err.to_string().contains(label), "{label}: {err}");
+        assert!(events.is_empty(), "a stale plan must not start a job");
+        assert!(exec.calls().is_empty(), "a stale plan must not execute");
+        assert!(matches!(
+            engine.create_media(&summary.plan_token, &f.target, &exec, &mut |_| {}),
+            Err(CoreError::MediaInvalidPlanToken)
+        ));
+    }
+}
+
+#[test]
+fn unavailable_media_executor_reports_failure_and_consumes_the_token() {
+    struct Unavailable;
+    impl MediaExecutor for Unavailable {
+        fn execute(&self, _: &MediaPlan, _: &mut dyn FnMut(u64, u64)) -> Result<()> {
+            Err(CoreError::MediaExecutorNotReady)
+        }
+    }
+
+    let (mut engine, _base) = tmp_engine();
+    let f = facts();
+    let summary = engine
+        .plan_media(&f, &Default::default(), &mut |_| {})
+        .unwrap();
+    let mut events = Vec::new();
+    let err = engine
+        .create_media(&summary.plan_token, &f.target, &Unavailable, &mut |e| {
+            events.push(e)
+        })
+        .unwrap_err();
+    assert!(matches!(err, CoreError::MediaExecutorNotReady));
+    assert!(matches!(events.first(), Some(Event::JobStarted { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::JobProgress { .. })));
+    assert!(matches!(
+        events.last(),
+        Some(Event::JobFinished {
+            outcome: JobOutcome::Failed,
+            summary_id,
+            ..
+        }) if summary_id == "result.media_failed"
+    ));
+    assert!(matches!(
+        engine.create_media(&summary.plan_token, &f.target, &Unavailable, &mut |_| {}),
+        Err(CoreError::MediaInvalidPlanToken)
+    ));
 }

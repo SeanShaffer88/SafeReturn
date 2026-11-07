@@ -20,7 +20,7 @@ The test files are `crates/safereturn-cli/tests/cli_smoke.rs` and the integratio
 | Gate | Why still open | Required next evidence |
 | --- | --- | --- |
 | Real VSS begin/capture/release | Live test intentionally ignored; no elevated session | Approved elevated Windows session, SDK helper, real locked-file snapshot and cleanup verification; follow S3 notes |
-| Recovery USB creation and boot | No disposable target selected | Explicitly identified disposable device, media verification and actual WinPE boot |
+| Recovery USB creation and boot | No disposable target selected; current built-in executor is disabled | Implement and review physical target binding and protected-disk checks first, then separately approve disposable-device verification and a real WinPE boot |
 | Whole-disk restore | No disposable disk/VM selected; current real executor also refuses execution | Implement/review the executor, then test only against an explicitly selected disposable target |
 | VM boot rehearsal | No Hyper-V test VM available in this Home session | Isolated compatible VM and observed boot; retain source of the observation |
 | Pro, Windows 10, ARM64, accessibility | Not exercised here | Separate edition/device and assistive-technology matrix |

@@ -486,4 +486,7 @@ fn guarded_media_plan_records_a_system_disk_acknowledgment() {
     assert!(summary
         .warnings
         .contains(&WARNING_IS_SYSTEM_DISK.to_string()));
+    assert!(summary
+        .warnings
+        .contains(&MEDIA_CREATION_UNAVAILABLE_WARNING_ID.to_string()));
 }
