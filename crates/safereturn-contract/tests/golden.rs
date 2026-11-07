@@ -56,6 +56,16 @@ fn fixtures() -> Vec<(&'static str, WireMessage)> {
             }),
         ),
         (
+            "job_progress_checking",
+            WireMessage::Event(Event::JobProgress {
+                job_id: "job-1".into(),
+                phase_id: "phase.checking_backup".into(),
+                done: 12,
+                total: 30,
+                unit: "chunk references".into(),
+            }),
+        ),
+        (
             "plan_restore",
             WireMessage::Request {
                 id: 7,

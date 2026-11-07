@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const SET_FORMAT_VERSION: u32 = 1;
@@ -271,6 +271,36 @@ pub fn backup_tree_with_source(
     created_unix: u64,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<BackupOutcome> {
+    backup_tree_with_source_progress(
+        volume,
+        source,
+        label,
+        roots,
+        created_unix,
+        &mut |phase, done, total| {
+            if phase == BackupPhase::Copying {
+                progress(done, total);
+            }
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackupPhase {
+    Copying,
+    Verifying,
+}
+
+/// Internal phased variant so the engine can report the separate read-back
+/// phase without changing the public file-copy progress callback.
+pub(crate) fn backup_tree_with_source_progress(
+    volume: &UnlockedVolume,
+    source: &dyn CaptureSource,
+    label: &str,
+    roots: &[PathBuf],
+    created_unix: u64,
+    progress: &mut dyn FnMut(BackupPhase, u64, u64),
+) -> Result<BackupOutcome> {
     let mut display_names = Vec::new();
     for root in roots {
         let name = root_display_name(root);
@@ -286,9 +316,15 @@ pub fn backup_tree_with_source(
     let mut chunks_written = 0u64;
     let mut chunks_reused = 0u64;
     for (i, item) in found.iter().enumerate() {
-        let entry = backup_one_file(volume, item, &mut chunks_written, &mut chunks_reused)?;
+        let entry = backup_one_file(volume, item, &mut chunks_written, &mut chunks_reused)
+            .map_err(|error| match error {
+                CoreError::SourceUnreadable { .. } => error,
+                other => CoreError::BackupWriteFailed {
+                    detail: other.to_string(),
+                },
+            })?;
         files.push(entry);
-        progress(i as u64 + 1, total);
+        progress(BackupPhase::Copying, i as u64 + 1, total);
     }
     let manifest = SetManifest {
         format_version: SET_FORMAT_VERSION,
@@ -301,7 +337,28 @@ pub fn backup_tree_with_source(
         files,
         skipped,
     };
-    write_set_manifest(volume, &manifest)?;
+    // Re-read *all* referenced chunks, including reused ones, and prove
+    // their ordered contents match each file's captured size and hash.
+    // A damaged dedupe hit must not become a successful new backup.
+    let report = verify_manifest(volume, &manifest, &mut |done, total| {
+        progress(BackupPhase::Verifying, done, total);
+    })
+    .map_err(|e| CoreError::BackupVerificationFailed {
+        detail: e.to_string(),
+    })?;
+    if !report.passed() {
+        return Err(CoreError::BackupVerificationFailed {
+            detail: report.failure_summary(),
+        });
+    }
+    // Only publish a manifest after its serialized bytes have also been
+    // flushed and read back. Earlier failures leave no partial set.
+    write_set_manifest(volume, &manifest).map_err(|error| match error {
+        CoreError::BackupVerificationFailed { .. } => error,
+        other => CoreError::BackupWriteFailed {
+            detail: other.to_string(),
+        },
+    })?;
     Ok(BackupOutcome {
         manifest,
         chunks_written,
@@ -380,6 +437,16 @@ fn set_manifest_path(volume: &UnlockedVolume, set_id: &str) -> PathBuf {
 }
 
 pub fn write_set_manifest(volume: &UnlockedVolume, manifest: &SetManifest) -> Result<()> {
+    write_set_manifest_inner(volume, manifest, |_| Ok(()))
+}
+
+// The hook is a no-op in production; tests use it to inject a failed
+// read-back between the flush and publication without racing the disk.
+fn write_set_manifest_inner(
+    volume: &UnlockedVolume,
+    manifest: &SetManifest,
+    after_flush: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let path = set_manifest_path(volume, &manifest.set_id);
     if path.exists() {
         return Err(CoreError::SetAlreadyExists {
@@ -388,11 +455,36 @@ pub fn write_set_manifest(volume: &UnlockedVolume, manifest: &SetManifest) -> Re
     }
     fs::create_dir_all(volume.sets_dir()).map_err(|e| io_at(&volume.sets_dir(), e))?;
     let json = serde_json::to_string_pretty(manifest).unwrap();
-    // Temp + rename, like chunks: a crash never leaves a torn manifest.
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|e| io_at(&tmp, e))?;
-    fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
-    Ok(())
+    // Read back the flushed bytes before the atomic publication step. A
+    // uniquely named temp file prevents concurrent writers sharing one
+    // partial manifest; stray temp files are not listed as backup sets.
+    let tmp = path.with_extension(format!("json.{}.tmp", hex::encode(&random_array::<8>()?)));
+    let mut created = false;
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| io_at(&tmp, e))?;
+        created = true;
+        file.write_all(json.as_bytes())
+            .map_err(|e| io_at(&tmp, e))?;
+        file.sync_all().map_err(|e| io_at(&tmp, e))?;
+        drop(file);
+        after_flush(&tmp)?;
+        let saved = fs::read(&tmp).map_err(|e| io_at(&tmp, e))?;
+        if saved != json.as_bytes() {
+            return Err(CoreError::BackupVerificationFailed {
+                detail: "the saved manifest does not match the data that was written".to_string(),
+            });
+        }
+        fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
+        Ok(())
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Attach gathered system facts to an existing set (S3). Facts are
@@ -498,62 +590,196 @@ pub struct ChunkFailure {
     pub reason: String,
 }
 
+/// A file that cannot be assembled to its recorded size and SHA-256.
+/// Reasons are stable codes: `chunk_unavailable`, `size_mismatch`,
+/// `hash_mismatch`, or `duplicate_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFailure {
+    pub path: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetVerifyReport {
     pub set_id: String,
     pub files: usize,
+    /// Unique chunk ids checked, even when the same chunk is used by
+    /// multiple files or more than once in a file.
     pub chunks_checked: usize,
     pub chunks_ok: usize,
-    /// Total plaintext bytes across the set's files.
+    /// Total plaintext bytes recorded across the set's files.
     pub plaintext_bytes: u64,
-    /// Every failed chunk, named by id. Empty means the set is intact.
+    /// Every unreadable or damaged chunk, named by id.
     pub failures: Vec<ChunkFailure>,
+    /// Files whose ordered chunks do not reproduce the recorded file,
+    /// or which could not be checked because a chunk was unavailable.
+    pub file_failures: Vec<FileFailure>,
 }
 
 impl SetVerifyReport {
     pub fn passed(&self) -> bool {
-        self.failures.is_empty() && self.chunks_checked == self.chunks_ok
+        self.failures.is_empty()
+            && self.file_failures.is_empty()
+            && self.chunks_checked == self.chunks_ok
+    }
+
+    fn failure_summary(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(first) = self.failures.first() {
+            parts.push(format!(
+                "{} chunk(s) could not be read (first: {} — {})",
+                self.failures.len(),
+                first.chunk_id,
+                first.reason
+            ));
+        }
+        if let Some(first) = self.file_failures.first() {
+            parts.push(format!(
+                "{} file check(s) failed (first: {} — {})",
+                self.file_failures.len(),
+                first.path,
+                first.reason
+            ));
+        }
+        parts.join("; ")
     }
 }
 
-/// Level-1 Rehearsal over a whole set: fetch, decrypt, decompress, and
-/// re-hash every distinct chunk. Read-only on the volume. Progress is
-/// called as (chunks_done, chunks_total).
+/// Level-1 check: decrypt and hash the referenced chunks and stream them
+/// in file order to check each file's recorded length and whole-file hash.
+/// Progress counts chunk *references* processed (readable duplicates are
+/// reread), while the report counts distinct chunk ids. The backup is read-only.
+/// This checks consistency with the current manifest, not its authenticity
+/// or whether entries were removed from it after capture.
 pub fn verify_set(
     volume: &UnlockedVolume,
     set_id: &str,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<SetVerifyReport> {
     let manifest = read_set_manifest(volume, set_id)?;
-    let distinct: Vec<&str> = manifest.distinct_chunks().into_iter().collect();
-    let total = distinct.len() as u64;
-    let mut failures = Vec::new();
-    let mut ok = 0usize;
-    for (i, chunk_id) in distinct.iter().enumerate() {
-        match volume.get_chunk(chunk_id) {
-            Ok(_) => ok += 1,
-            Err(CoreError::ChunkMissing { .. }) => failures.push(ChunkFailure {
-                chunk_id: chunk_id.to_string(),
-                reason: "missing".to_string(),
-            }),
-            Err(CoreError::ChunkCorrupt { reason, .. }) => failures.push(ChunkFailure {
-                chunk_id: chunk_id.to_string(),
-                reason: reason.as_str().to_string(),
-            }),
-            Err(e) => failures.push(ChunkFailure {
-                chunk_id: chunk_id.to_string(),
-                reason: format!("io: {e}"),
-            }),
-        }
-        progress(i as u64 + 1, total);
+    if manifest.format_version != SET_FORMAT_VERSION {
+        return Err(CoreError::InvalidSetManifest {
+            set_id: set_id.to_string(),
+            reason: format!(
+                "format version {} is not supported (expected {})",
+                manifest.format_version, SET_FORMAT_VERSION
+            ),
+        });
     }
+    if manifest.set_id != set_id {
+        return Err(CoreError::InvalidSetManifest {
+            set_id: set_id.to_string(),
+            reason: format!("the manifest identifies itself as {}", manifest.set_id),
+        });
+    }
+    verify_manifest(volume, &manifest, progress)
+}
+
+/// Shared by Quick Check and backup finalization. Only one chunk is held
+/// at a time, so a large file does not need to fit in memory.
+fn verify_manifest(
+    volume: &UnlockedVolume,
+    manifest: &SetManifest,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<SetVerifyReport> {
+    let invalid = |reason: &str| CoreError::InvalidSetManifest {
+        set_id: manifest.set_id.clone(),
+        reason: reason.to_string(),
+    };
+    let plaintext_bytes = manifest
+        .files
+        .iter()
+        .try_fold(0u64, |sum, f| sum.checked_add(f.size))
+        .ok_or_else(|| invalid("the total recorded file size overflows"))?;
+    let total = manifest
+        .files
+        .iter()
+        .try_fold(0u64, |sum, f| {
+            u64::try_from(f.chunks.len())
+                .ok()
+                .and_then(|count| sum.checked_add(count))
+        })
+        .ok_or_else(|| invalid("the total number of chunk references overflows"))?;
+
+    let distinct = manifest.distinct_chunks();
+    let mut failures: BTreeMap<String, String> = BTreeMap::new();
+    let mut checks = Vec::with_capacity(manifest.files.len());
+    let mut done = 0u64;
+    for file in &manifest.files {
+        let mut hasher = Sha256::new();
+        let mut actual_size = 0u64;
+        let mut unavailable = false;
+        for chunk_id in &file.chunks {
+            if failures.contains_key(chunk_id) {
+                unavailable = true;
+            } else {
+                match volume.get_chunk(chunk_id) {
+                    Ok(bytes) => {
+                        actual_size = actual_size
+                            .checked_add(bytes.len() as u64)
+                            .ok_or_else(|| invalid("assembled file size overflows"))?;
+                        hasher.update(&bytes);
+                    }
+                    Err(e) => {
+                        let reason = match e {
+                            CoreError::ChunkMissing { .. } => "missing".to_string(),
+                            CoreError::ChunkCorrupt { reason, .. } => reason.as_str().to_string(),
+                            other => format!("io: {other}"),
+                        };
+                        failures.insert(chunk_id.clone(), reason);
+                        unavailable = true;
+                    }
+                }
+            }
+            done += 1;
+            progress(done, total);
+        }
+        let reason = if unavailable {
+            None // assigned below, including failures discovered in later files
+        } else if actual_size != file.size {
+            Some("size_mismatch")
+        } else if hex::encode(&hasher.finalize()) != file.sha256 {
+            Some("hash_mismatch")
+        } else {
+            None
+        };
+        checks.push(reason);
+    }
+
+    let mut file_failures = Vec::new();
+    let mut paths = HashSet::new();
+    for (file, reason) in manifest.files.iter().zip(checks) {
+        if !paths.insert(&file.path) {
+            file_failures.push(FileFailure {
+                path: file.path.clone(),
+                reason: "duplicate_path".to_string(),
+            });
+        }
+        let reason = if file.chunks.iter().any(|id| failures.contains_key(id)) {
+            Some("chunk_unavailable")
+        } else {
+            reason
+        };
+        if let Some(reason) = reason {
+            file_failures.push(FileFailure {
+                path: file.path.clone(),
+                reason: reason.to_string(),
+            });
+        }
+    }
+    let chunks_checked = distinct.len();
+    let chunks_ok = chunks_checked - failures.len();
     Ok(SetVerifyReport {
-        set_id: set_id.to_string(),
+        set_id: manifest.set_id.clone(),
         files: manifest.files.len(),
-        chunks_checked: distinct.len(),
-        chunks_ok: ok,
-        plaintext_bytes: manifest.total_bytes(),
-        failures,
+        chunks_checked,
+        chunks_ok,
+        plaintext_bytes,
+        failures: failures
+            .into_iter()
+            .map(|(chunk_id, reason)| ChunkFailure { chunk_id, reason })
+            .collect(),
+        file_failures,
     })
 }
 
@@ -741,4 +967,57 @@ pub fn plan_target_states(
         map.insert(entry.path.clone(), state);
     }
     Ok(map)
+}
+
+#[cfg(test)]
+mod finalization_tests {
+    use super::*;
+    use crate::volume::Volume;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn damaged_or_unreadable_staged_manifest_is_never_published() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "safereturn-manifest-readback-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let (locked, key) = Volume::create(&root, "test password", 1).unwrap();
+        let volume = locked.unlock_with_recovery_key(&key).unwrap();
+        let manifest = SetManifest {
+            format_version: SET_FORMAT_VERSION,
+            set_id: "readback-test".to_string(),
+            label: "test".to_string(),
+            created_unix: 1,
+            roots: vec![],
+            capture_mode: CaptureMode::Live,
+            system: None,
+            files: vec![],
+            skipped: vec![],
+        };
+        for remove in [false, true] {
+            let err = write_set_manifest_inner(&volume, &manifest, |tmp| {
+                if remove {
+                    fs::remove_file(tmp).map_err(|e| io_at(&tmp.to_path_buf(), e))?;
+                } else {
+                    fs::write(tmp, b"damaged manifest")
+                        .map_err(|e| io_at(&tmp.to_path_buf(), e))?;
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            if remove {
+                assert!(matches!(err, CoreError::Io { .. }));
+            } else {
+                assert!(matches!(err, CoreError::BackupVerificationFailed { .. }));
+            }
+            assert!(!root.join("sets/readback-test.json").exists());
+            assert!(list_set_ids(&volume).unwrap().is_empty());
+            assert_eq!(fs::read_dir(root.join("sets")).unwrap().count(), 0);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
 }

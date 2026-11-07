@@ -98,8 +98,8 @@ pub use sets::{
     attach_system_facts, backup_tree, backup_tree_with_source, list_set_ids, list_sets,
     plan_target_states, read_catalog, read_set_manifest, rebuild_catalog, restore_file,
     restore_files, restore_set, summarize, verify_set, BackupOutcome, Catalog, CatalogSet,
-    ChunkFailure, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport, SkippedEntry,
-    TargetState, SET_CHUNK_SIZE, SET_FORMAT_VERSION,
+    ChunkFailure, FileFailure, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport,
+    SkippedEntry, TargetState, SET_CHUNK_SIZE, SET_FORMAT_VERSION,
 };
 #[cfg(windows)]
 pub use system::WindowsFactsGatherer;

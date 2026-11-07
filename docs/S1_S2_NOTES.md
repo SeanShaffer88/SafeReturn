@@ -3,6 +3,9 @@
 **Date:** 2026-10-20 · **Slices:** S1 (commit `5cb2c54e`), S2 (commit `6f80fa27`) on top of the S0 skeleton.
 **Status of the whole repo:** pre-alpha. Everything below is implemented and tested on synthetic data; nothing has touched a real Windows system volume yet (see "Not done / not verified").
 
+These are historical slice notes. For current backup completion and Quick
+Check behavior, including important limitations, see `BACKUP_INTEGRITY.md`.
+
 ---
 
 ## What was built

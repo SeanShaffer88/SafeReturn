@@ -49,9 +49,9 @@ use crate::safe_target::{
     assess_media_target, assess_system_restore_target, SafeTargetAssessment, SafeTargetContext,
 };
 use crate::sets::{
-    backup_tree_with_source, hash_existing_file, list_sets, read_set_manifest, restore_entries,
-    verify_set, BackupOutcome, RestoreOutcome, SetFileEntry, SetManifest, SetVerifyReport,
-    TargetState,
+    backup_tree_with_source_progress, hash_existing_file, list_sets, read_set_manifest,
+    restore_entries, verify_set, BackupOutcome, BackupPhase, RestoreOutcome, SetFileEntry,
+    SetManifest, SetVerifyReport, TargetState,
 };
 use crate::system_restore::{
     plan_system_restore_checked as compute_system_restore_plan_checked, SystemRestoreOptions,
@@ -204,16 +204,27 @@ impl Engine {
             job_id: job_id.clone(),
         });
         let volume = &self.volume;
-        let mut progress = |done: u64, total: u64| {
+        let mut progress = |phase: BackupPhase, done: u64, total: u64| {
+            let (phase_id, unit) = match phase {
+                BackupPhase::Copying => ("phase.copying_files", "files"),
+                BackupPhase::Verifying => ("phase.checking_backup", "chunk references"),
+            };
             sink(Event::JobProgress {
                 job_id: job_id.clone(),
-                phase_id: "phase.copying_files".to_string(),
+                phase_id: phase_id.to_string(),
                 done,
                 total,
-                unit: "files".to_string(),
+                unit: unit.to_string(),
             });
         };
-        match backup_tree_with_source(volume, source, label, roots, now_unix(), &mut progress) {
+        match backup_tree_with_source_progress(
+            volume,
+            source,
+            label,
+            roots,
+            now_unix(),
+            &mut progress,
+        ) {
             Ok(outcome) => {
                 // The catalog is a rebuildable cache over the manifests;
                 // refresh it, but its failure must not misreport a backup
@@ -256,7 +267,7 @@ impl Engine {
                 phase_id: "phase.checking_backup".to_string(),
                 done,
                 total,
-                unit: "chunks".to_string(),
+                unit: "chunk references".to_string(),
             });
         };
         match verify_set(volume, set_id, &mut progress) {

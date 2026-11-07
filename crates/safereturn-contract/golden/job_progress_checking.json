@@ -1,0 +1,9 @@
+{
+  "kind": "event",
+  "type": "job_progress",
+  "job_id": "job-1",
+  "phase_id": "phase.checking_backup",
+  "done": 12,
+  "total": 30,
+  "unit": "chunk references"
+}

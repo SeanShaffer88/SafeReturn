@@ -59,6 +59,15 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(&Sha256::digest(data))
 }
 
+/// On-disk chunk names are lowercase SHA-256 hex, never paths. Validate
+/// before slicing or joining an id read from an untrusted manifest.
+fn valid_chunk_id(chunk_id: &str) -> bool {
+    chunk_id.len() == 64
+        && chunk_id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KdfSection {
     /// "argon2id"
@@ -221,12 +230,28 @@ impl UnlockedVolume {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| io_at(&path, e))?;
         }
-        // Write to a temp file in the same directory, then rename: a crash
-        // mid-write leaves a stray temp file, never a torn chunk record
-        // masquerading under a valid chunk id.
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, &record).map_err(|e| io_at(&tmp, e))?;
-        fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
+        // A unique temp file keeps concurrent writers from sharing a
+        // partially written record. Flush its contents before publishing;
+        // backup finalization separately re-reads every referenced chunk.
+        let tmp = path.with_extension(format!("{}.tmp", hex::encode(&random_array::<8>()?)));
+        let mut created = false;
+        let written: Result<()> = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| io_at(&tmp, e))?;
+            created = true;
+            file.write_all(&record).map_err(|e| io_at(&tmp, e))?;
+            file.sync_all().map_err(|e| io_at(&tmp, e))?;
+            drop(file);
+            fs::rename(&tmp, &path).map_err(|e| io_at(&path, e))?;
+            Ok(())
+        })();
+        if written.is_err() && created {
+            let _ = fs::remove_file(&tmp);
+        }
+        written?;
         Ok(chunk_id)
     }
 
@@ -263,6 +288,12 @@ impl UnlockedVolume {
     /// handed out if its plaintext hashes to the id it was asked for —
     /// AEAD alone would not catch two valid records being swapped.
     pub fn get_chunk(&self, chunk_id: &str) -> Result<Vec<u8>> {
+        if !valid_chunk_id(chunk_id) {
+            return Err(CoreError::ChunkCorrupt {
+                chunk_id: chunk_id.to_string(),
+                reason: ChunkCorruptReason::BadRecord,
+            });
+        }
         let path = self.chunk_path(chunk_id);
         let record = match fs::read(&path) {
             Ok(r) => r,
@@ -287,15 +318,21 @@ impl UnlockedVolume {
         }
         let compression_alg = record[5];
         let nonce = &record[8..8 + NONCE_LEN];
-        let plaintext_len = u64::from_le_bytes(record[32..40].try_into().unwrap()) as usize;
+        let stored_len = u64::from_le_bytes(record[32..40].try_into().unwrap());
+        let plaintext_len =
+            usize::try_from(stored_len).map_err(|_| corrupt(ChunkCorruptReason::BadRecord))?;
         let ciphertext = &record[40..];
         let body = crate::crypto::open(self.key.as_bytes(), chunk_id.as_bytes(), nonce, ciphertext)
             .map_err(|_| corrupt(ChunkCorruptReason::DecryptFailed))?;
         let plaintext = match compression_alg {
             COMPRESSION_NONE => body.to_vec(),
             COMPRESSION_DEFLATE => {
-                let mut out = Vec::with_capacity(plaintext_len);
+                // The length header is not authenticated. Do not reserve
+                // its claimed size: a damaged header could otherwise
+                // request an enormous allocation before validation.
+                let mut out = Vec::new();
                 DeflateDecoder::new(&body[..])
+                    .take(stored_len.saturating_add(1))
                     .read_to_end(&mut out)
                     .map_err(|_| corrupt(ChunkCorruptReason::DecompressFailed))?;
                 out
@@ -312,7 +349,7 @@ impl UnlockedVolume {
     }
 
     pub fn chunk_exists(&self, chunk_id: &str) -> bool {
-        self.chunk_path(chunk_id).exists()
+        valid_chunk_id(chunk_id) && self.chunk_path(chunk_id).exists()
     }
 
     /// All chunk ids physically present on the volume, sorted. Used by
