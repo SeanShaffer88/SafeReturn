@@ -1,0 +1,7 @@
+{
+  "kind": "event",
+  "type": "job_finished",
+  "job_id": "job-1",
+  "outcome": "succeeded",
+  "summary_id": "result.backup_succeeded_with_skips"
+}

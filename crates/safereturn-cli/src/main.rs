@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 const EXIT_OK: i32 = 0;
 const EXIT_FAIL: i32 = 1;
 const EXIT_USAGE: i32 = 2;
+// A set was saved, but at least one discovered entry was omitted.
+const EXIT_BACKUP_WITH_SKIPS: i32 = 3;
 
 #[derive(Default)]
 struct Options {
@@ -144,6 +146,11 @@ Usage:
 Credentials (every command except init-volume):
   --passphrase <p>        passphrase (or set SAFERETURN_PASSPHRASE, or be prompted)
   --recovery-key <file>   open the volume with a saved recovery key file instead
+
+Backup exits: 0 means the set was saved with no recorded skips; 3 means
+it was saved but some entries were skipped. Review the skipped list before
+relying on the backup. Other nonzero exits indicate an error; some errors,
+such as snapshot cleanup failure, can happen after a set was saved.
 
 Snapshot backups (Windows, elevated): --snapshot C:\\ captures from a
 VSS snapshot of that volume, so every folder you list must be on it. If
@@ -345,6 +352,9 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         CoreError::BackupPathUnsupported { .. } => {
             "No new backup set or chunks were written; source files and earlier sets were not changed."
         }
+        CoreError::UnsafeBackupSource { .. } => {
+            "No new backup set was saved. Chunks copied before the backup stopped may remain on the backup volume."
+        }
         CoreError::SourceUnreadable { .. }
         | CoreError::BackupVerificationFailed { .. }
         | CoreError::BackupWriteFailed { .. } => {
@@ -436,7 +446,12 @@ fn make_sink(json: bool) -> impl FnMut(Event) {
                     JobOutcome::Failed => "FAILED",
                     JobOutcome::Cancelled => "cancelled",
                 };
-                eprintln!("  [{mark}] {summary_id}");
+                let summary = if summary_id == BACKUP_WITH_SKIPS_SUMMARY_ID {
+                    BACKUP_WITH_SKIPS_MESSAGE
+                } else {
+                    &summary_id
+                };
+                eprintln!("  [{mark}] {summary}");
             }
             _ => {}
         }
@@ -504,6 +519,22 @@ fn write_key_file(path: &PathBuf, text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+// The snapshot owner must not report an omitted capture as a completed
+// backup to VSS writers. The generic callbacks let the policy be tested
+// without pretending that a live VSS session ran in CI.
+fn close_snapshot_for_backup<S, E>(
+    session: S,
+    has_skips: bool,
+    finish: impl FnOnce(S) -> std::result::Result<(), E>,
+    abort: impl FnOnce(S) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    if has_skips {
+        abort(session)
+    } else {
+        finish(session)
+    }
+}
+
 fn cmd_backup(pos: &[String], opts: &Options) -> i32 {
     if pos.len() < 3 {
         eprintln!(
@@ -567,10 +598,19 @@ fn cmd_backup(pos: &[String], opts: &Options) -> i32 {
     };
     let outcome = match backup_result {
         Ok(o) => {
-            // Finish (BackupComplete + delete snapshot) only a backup
-            // that succeeded; a failed backup aborts its snapshot.
+            // A saved set with omissions is useful, but must not be
+            // reported as a complete backup to VSS writers.
             if let Some(session) = snapshot_session {
-                if let Err(e) = session.finish() {
+                let has_skips = !o.manifest.skipped.is_empty();
+                if has_skips {
+                    eprintln!("Snapshot: some entries were skipped; requesting an abort rather than reporting a complete backup to VSS writers.");
+                }
+                if let Err(e) = close_snapshot_for_backup(
+                    session,
+                    has_skips,
+                    SnapshotSession::finish,
+                    SnapshotSession::abort,
+                ) {
                     eprintln!(
                         "Warning: backup set {} WAS saved, but the snapshot could not be cleaned up: {e}",
                         o.manifest.set_id
@@ -608,7 +648,11 @@ fn cmd_backup(pos: &[String], opts: &Options) -> i32 {
             Err(e) => return report_error(&e),
         }
     }
-    EXIT_OK
+    if outcome.manifest.skipped.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_BACKUP_WITH_SKIPS
+    }
 }
 
 fn print_backup_summary(outcome: &BackupOutcome, opts: &Options) {
@@ -616,7 +660,11 @@ fn print_backup_summary(outcome: &BackupOutcome, opts: &Options) {
         return;
     }
     let m = &outcome.manifest;
-    println!("Backup finished.");
+    if m.skipped.is_empty() {
+        println!("Backup finished.");
+    } else {
+        println!("{BACKUP_WITH_SKIPS_MESSAGE}");
+    }
     println!("set_id: {}", m.set_id);
     println!(
         "Capture: {}",
@@ -2263,6 +2311,42 @@ mod tests {
         assert_eq!(fmt_datetime(0), "1970-01-01 00:00 UTC");
         assert_eq!(fmt_datetime(1_700_000_000), "2023-11-14 22:13 UTC");
         assert_eq!(fmt_datetime(1_735_689_600), "2025-01-01 00:00 UTC");
+    }
+
+    #[test]
+    fn snapshot_cleanup_does_not_report_a_skipped_backup_as_complete() {
+        for has_skips in [false, true] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let result = close_snapshot_for_backup(
+                "snapshot",
+                has_skips,
+                |session| {
+                    calls.borrow_mut().push((session, "finish"));
+                    Ok::<_, &str>(())
+                },
+                |session| {
+                    calls.borrow_mut().push((session, "abort"));
+                    Ok::<_, &str>(())
+                },
+            );
+            assert!(result.is_ok());
+            let expected = if has_skips { "abort" } else { "finish" };
+            assert_eq!(*calls.borrow(), vec![("snapshot", expected)]);
+        }
+        let failed = close_snapshot_for_backup(
+            (),
+            true,
+            |_| Ok::<_, &str>(()),
+            |_| Err::<(), _>("abort failed"),
+        );
+        assert_eq!(failed, Err("abort failed"));
+        let failed = close_snapshot_for_backup(
+            (),
+            false,
+            |_| Err::<(), _>("finish failed"),
+            |_| Ok::<_, &str>(()),
+        );
+        assert_eq!(failed, Err("finish failed"));
     }
 
     #[test]

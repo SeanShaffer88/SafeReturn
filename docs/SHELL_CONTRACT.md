@@ -59,11 +59,27 @@ Types for the rows above marked v1-core are in the crate now; restore/media rows
 
 **Backup integrity update (2026-11-07):** before copying, the engine rejects
 unrepresentable source names or common file/directory path aliases with
-`backup.unsupported_path`; that refusal writes no chunks or new set. The
-ordinary CLI prints skipped entries, but the current job events do not contain
-their details. Shells must not imply every selected item was captured. Before
-a new set is published, the engine re-reads its chunk references and checks
-each file's recorded size and hash. Backup and Quick Check emit the existing
+`backup.unsupported_path`; that refusal writes no chunks or new set. A
+selected root or checked ancestor that is a link/reparse point, or a
+previously enumerated source found unsafe before opening, stops the backup with
+`backup.unsafe_source`. No set is published; chunks copied before the refusal
+may remain. The checks are not race-free. Nested links, reparse points and
+non-regular entries are instead recorded as skipped. A saved set with skips
+finishes as `JobFinished { outcome: succeeded, summary_id:
+"result.backup_succeeded_with_skips" }`. The event shape is unchanged and this
+ID is pinned by a golden fixture; shells **must** render the warning rather
+than treating `succeeded` alone as full coverage. Existing clients that ignore
+unknown summary IDs may misreport the result and must be updated. The ordinary
+CLI prints each skipped path and reason and exits with code 3 for a saved set
+with skips, including in JSON mode. Other nonzero exits can also happen after a
+set is saved, such as on snapshot cleanup failure. Current job events/`--json`
+carry no skipped paths, count, or new set ID. Core callers have
+`BackupOutcome.manifest.skipped`; CLI users can identify the set with
+`list-sets` and inspect the plaintext manifest (which is not reliably correlated
+to a concurrent JSON job). Details and trusted-anchor limitations are in
+`BACKUP_INTEGRITY.md`. Before a new set is published, the engine re-reads its
+chunk references and checks each file's recorded size and hash. Backup and Quick
+Check emit the existing
 `JobProgress` shape with phase `phase.checking_backup` and unit
 `chunk references` during this work. The
 core's Quick Check report names chunk and file failures, but the current wire

@@ -68,6 +68,8 @@ pub const BODY_EXIT: &str = "shell.exit.body";
 /// Core-owned warning carried by media previews, including JSON clients.
 pub const WARNING_MEDIA_CREATION_UNAVAILABLE: &str =
     safereturn_core::MEDIA_CREATION_UNAVAILABLE_WARNING_ID;
+/// Core-owned result indicating a saved backup omitted some entries.
+pub const RESULT_BACKUP_WITH_SKIPS: &str = safereturn_core::BACKUP_WITH_SKIPS_SUMMARY_ID;
 
 // -- Controls ----------------------------------------------------------------
 // Every control has a label id, an accessible-name id, and a
@@ -150,6 +152,7 @@ pub const ALL_IDS: &[&str] = &[
     BODY_INCOMPATIBLE,
     BODY_EXIT,
     WARNING_MEDIA_CREATION_UNAVAILABLE,
+    RESULT_BACKUP_WITH_SKIPS,
     CONTROL_CONTINUE,
     CONTROL_BACK,
     CONTROL_EXIT,
@@ -222,6 +225,7 @@ pub fn text(id: &str) -> Option<&'static str> {
         BODY_INCOMPATIBLE => "This recovery shell and the engine do not match. SafeReturn needs to be repaired or reinstalled; nothing was changed.",
         BODY_EXIT => "You can remove the recovery media and restart the PC. If you restored the whole PC, the restored Windows should start; if it does not, boot this media again and check the restore result.",
         WARNING_MEDIA_CREATION_UNAVAILABLE | "media.executor_not_ready" => safereturn_core::MEDIA_CREATION_UNAVAILABLE_MESSAGE,
+        RESULT_BACKUP_WITH_SKIPS => safereturn_core::BACKUP_WITH_SKIPS_MESSAGE,
 
         // Error-support ids (used as Event::Error fields, not
         // screen body ids).

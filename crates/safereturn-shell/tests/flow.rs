@@ -517,6 +517,13 @@ fn strings_table_is_complete_and_unique() {
 }
 
 #[test]
+fn backup_with_skips_result_is_not_rendered_as_full_success() {
+    let text = strings::text(safereturn_core::BACKUP_WITH_SKIPS_SUMMARY_ID).unwrap();
+    assert!(text.contains("some items were not backed up"));
+    assert!(text.contains("skipped list"));
+}
+
+#[test]
 fn media_unavailable_warning_and_error_have_the_same_actionable_text() {
     let warning = strings::text(safereturn_core::MEDIA_CREATION_UNAVAILABLE_WARNING_ID).unwrap();
     let error = strings::text("media.executor_not_ready").unwrap();
