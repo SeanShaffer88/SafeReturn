@@ -57,10 +57,15 @@ CLI (Rust) ── same message types, text rendering ─────────
 
 Types for the rows above marked v1-core are in the crate now; restore/media rows land with their slices (S4/S5) under the same rules.
 
-**Backup integrity update (2026-11-07):** before a new set is published, the
-engine re-reads its chunk references and checks each file's recorded size and
-hash. Backup and Quick Check emit the existing `JobProgress` shape with phase
-`phase.checking_backup` and unit `chunk references` during this work. The
+**Backup integrity update (2026-11-07):** before copying, the engine rejects
+unrepresentable source names or common file/directory path aliases with
+`backup.unsupported_path`; that refusal writes no chunks or new set. The
+ordinary CLI prints skipped entries, but the current job events do not contain
+their details. Shells must not imply every selected item was captured. Before
+a new set is published, the engine re-reads its chunk references and checks
+each file's recorded size and hash. Backup and Quick Check emit the existing
+`JobProgress` shape with phase `phase.checking_backup` and unit
+`chunk references` during this work. The
 core's Quick Check report names chunk and file failures, but the current wire
 events carry only job status and progress, not that detailed report. Do not
 claim that this verifies the manifest's authenticity, catalog consistency,

@@ -117,6 +117,7 @@ fn duplicate_case_and_file_directory_aliases_refuse_entire_scope() {
         ("source/docs/a.txt", "source/docs/a.txt", "duplicate_path"),
         ("source/docs/A.txt", "source/docs/a.txt", "conflicting_path"),
         ("source/docs/a", "source/docs/A/child", "conflicting_path"),
+        ("source/Docs/a.txt", "source/docs/b.txt", "conflicting_path"),
     ] {
         let mut changed = original.clone();
         changed.files[0].path = first.to_string();
@@ -369,6 +370,7 @@ fn newly_captured_unportable_recorded_path_is_not_published() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("file:stream"), b"must remain intact").unwrap();
     let before = list_set_ids(engine.volume()).unwrap();
+    let chunks_before = engine.volume().chunk_ids_on_disk().unwrap();
     let err = backup_tree(
         engine.volume(),
         "bad path",
@@ -377,9 +379,11 @@ fn newly_captured_unportable_recorded_path_is_not_published() {
         &mut |_, _| {},
     )
     .unwrap_err();
-    assert!(matches!(err, CoreError::BackupVerificationFailed { .. }));
-    assert!(err.to_string().contains("unsafe_path"));
+    assert!(matches!(err, CoreError::BackupPathUnsupported { .. }));
+    assert_eq!(err.code(), "backup.unsupported_path");
+    assert!(err.to_string().contains("file:stream"));
     assert_eq!(list_set_ids(engine.volume()).unwrap(), before);
+    assert_eq!(engine.volume().chunk_ids_on_disk().unwrap(), chunks_before);
     assert_eq!(
         fs::read(source.join("file:stream")).unwrap(),
         b"must remain intact"

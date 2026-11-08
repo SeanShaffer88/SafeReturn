@@ -8,7 +8,9 @@
 //! is implemented and tested, because "the catalog can be rebuilt from
 //! the backup drive alone" is a promise the Recovery Rehearsal makes.
 
-use crate::capture::{last_path_segment, CaptureMode, CaptureSource, LiveSource};
+use crate::capture::{
+    unicode_path, validate_source_component, CaptureMode, CaptureSource, LiveSource,
+};
 use crate::crypto::random_array;
 use crate::error::{io_at, CoreError, Result};
 use crate::hex;
@@ -22,7 +24,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const SET_FORMAT_VERSION: u32 = 1;
 /// Production chunk size: 1 MiB of plaintext per chunk (plan §4: fixed-size
@@ -45,8 +47,8 @@ pub struct SetFileEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedEntry {
     pub path: String,
-    /// Why it was not backed up, plain language (e.g. "symbolic link —
-    /// links are not followed"). Shown to the user; never silent.
+    /// Why it was not backed up, in plain language. The ordinary CLI
+    /// prints these entries; current job events do not carry their detail.
     pub reason: String,
 }
 
@@ -173,12 +175,10 @@ fn slugify(label: &str) -> String {
     slug
 }
 
-fn root_display_name(root: &Path) -> String {
-    // From the *logical* root string, splitting on both separators: a
-    // logical root may be Windows-style (C:\Users\…) on any host OS.
-    last_path_segment(root)
-        .map(|n| slugify(&n))
-        .unwrap_or_else(|| "root".to_string())
+fn root_display_name(name: Option<&str>) -> String {
+    // Root labels have always been slugs. File and descendant names, by
+    // contrast, must be preserved exactly or refused.
+    name.map(slugify).unwrap_or_else(|| "root".to_string())
 }
 
 fn new_set_id(label: &str, created_unix: u64) -> Result<String> {
@@ -193,16 +193,42 @@ fn new_set_id(label: &str, created_unix: u64) -> Result<String> {
 struct FoundFile {
     set_path: String,
     source: PathBuf,
+    logical_source: PathBuf,
+}
+
+/// Convert native components one at a time. In particular, a literal `\`
+/// in a Unix filename is not a separator and must never be turned into one.
+fn source_relative_path(logical_root: &Path, relative: &Path) -> Result<String> {
+    let logical_path = logical_root.join(relative);
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(CoreError::BackupPathUnsupported {
+                path: logical_path,
+                reason: "the source path has a non-normal component".to_string(),
+            });
+        };
+        let name = name
+            .to_str()
+            .ok_or_else(|| CoreError::BackupPathUnsupported {
+                path: logical_path.clone(),
+                reason: "the source name is not valid Unicode".to_string(),
+            })?;
+        validate_source_component(name, &logical_path)?;
+        parts.push(name);
+    }
+    Ok(parts.join("/"))
 }
 
 /// Walk the roots (through the capture source) and enumerate regular
-/// files. Symlinks and non-regular files are recorded as skipped, never
-/// followed and never silent. Set paths are built from the *logical*
-/// root only — the resolved (e.g. snapshot device) path is used solely
-/// to open files and never leaks into the manifest.
+/// files. Child entries detected as symlinks and non-regular entries are
+/// recorded as skipped. Root links, ancestor links, other reparse points,
+/// and concurrent changes are not comprehensively fenced; see the backup
+/// integrity notes. Set paths use the logical root, not the device path.
 fn enumerate(
     source: &dyn CaptureSource,
     roots: &[PathBuf],
+    root_names: &[Option<String>],
     display_names: &[String],
 ) -> Result<(Vec<FoundFile>, Vec<SkippedEntry>)> {
     let mut found = Vec::new();
@@ -215,10 +241,18 @@ fn enumerate(
             source: e,
         })?;
         if meta.is_file() {
-            let name = last_path_segment(root).unwrap_or_else(|| "file".to_string());
+            let name =
+                root_names[idx]
+                    .as_deref()
+                    .ok_or_else(|| CoreError::BackupPathUnsupported {
+                        path: root.clone(),
+                        reason: "the selected file has no usable logical name".to_string(),
+                    })?;
+            validate_source_component(name, root)?;
             found.push(FoundFile {
                 set_path: format!("{display}/{name}"),
                 source: open_root,
+                logical_source: root.clone(),
             });
             continue;
         }
@@ -237,23 +271,25 @@ fn enumerate(
             }
             entries.sort();
             for path in entries {
-                let rel = path
-                    .strip_prefix(&open_root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let set_path = format!("{display}/{rel}");
+                let rel = path.strip_prefix(&open_root).map_err(|_| {
+                    CoreError::BackupPathUnsupported {
+                        path: root.clone(),
+                        reason: "an enumerated path was outside its source root".to_string(),
+                    }
+                })?;
+                let set_path = format!("{display}/{}", source_relative_path(root, rel)?);
                 let ftype = fs::symlink_metadata(&path).map_err(|e| io_at(&path, e))?;
                 if ftype.file_type().is_symlink() {
                     skipped.push(SkippedEntry {
                         path: set_path,
-                        reason: "symbolic link — links are not followed".to_string(),
+                        reason: "symbolic link — this entry was not followed".to_string(),
                     });
                 } else if ftype.is_dir() {
                     stack.push(path);
                 } else if ftype.is_file() {
                     found.push(FoundFile {
                         set_path,
+                        logical_source: root.join(rel),
                         source: path,
                     });
                 } else {
@@ -273,10 +309,10 @@ fn enumerate(
 /// set on the volume, reading from the live filesystem. Progress is
 /// called as (files_done, files_total).
 ///
-/// Failure policy: a source file that cannot be read aborts the backup
-/// with `SourceUnreadable` and **no set manifest is written** — chunks
-/// already stored stay on the volume as harmless dedupe pool content, but
-/// a partial backup never appears as a set.
+/// Unsupported source names are rejected before chunk writes. A source
+/// file that cannot be read aborts with `SourceUnreadable` and **no set
+/// manifest is written**; chunks already stored may remain as dedupe pool
+/// content. No partial backup appears as a set.
 pub fn backup_tree(
     volume: &UnlockedVolume,
     label: &str,
@@ -329,15 +365,37 @@ pub(crate) fn backup_tree_with_source_progress(
     created_unix: u64,
     progress: &mut dyn FnMut(BackupPhase, u64, u64),
 ) -> Result<BackupOutcome> {
+    let mut root_names = Vec::new();
     let mut display_names = Vec::new();
     for root in roots {
-        let name = root_display_name(root);
+        // Even custom sources must not map a lossy logical root to a
+        // different path; device-root prefixes themselves remain opaque.
+        unicode_path(root)?;
+        let logical_name = source.logical_root_name(root)?;
+        let name = root_display_name(logical_name.as_deref());
         if display_names.contains(&name) {
             return Err(CoreError::RootNameCollision { name });
         }
+        root_names.push(logical_name);
         display_names.push(name);
     }
-    let (found, skipped) = enumerate(source, roots, &display_names)?;
+    let (found, skipped) = enumerate(source, roots, &root_names, &display_names)?;
+    // Reject portable-name and alias conflicts before copying any chunks,
+    // rather than discovering them during read-back after data was written.
+    if let Some(issue) = path_issues(found.iter().map(|file| file.set_path.as_str()))
+        .into_iter()
+        .next()
+    {
+        let path = found
+            .iter()
+            .find(|file| file.set_path == issue.path)
+            .map(|file| file.logical_source.clone())
+            .unwrap_or_else(|| PathBuf::from(&issue.path));
+        return Err(CoreError::BackupPathUnsupported {
+            path,
+            reason: issue.detail,
+        });
+    }
     let total = found.len() as u64;
     let set_id = new_set_id(label, created_unix)?;
     let mut files = Vec::with_capacity(found.len());

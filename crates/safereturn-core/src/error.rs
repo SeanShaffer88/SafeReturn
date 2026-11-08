@@ -90,6 +90,12 @@ pub enum CoreError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// A source name cannot be represented losslessly or safely in the
+    /// current portable manifest format. The set is not published.
+    BackupPathUnsupported {
+        path: PathBuf,
+        reason: String,
+    },
     /// A newly captured set could not be read back and verified. The
     /// manifest was not published; chunks already written remain as
     /// dedupe pool content, and existing chunks are not overwritten.
@@ -328,6 +334,7 @@ impl CoreError {
             CoreError::SetAlreadyExists { .. } => "set.already_exists",
             CoreError::FileNotInSet { .. } => "set.file_not_found",
             CoreError::SourceUnreadable { .. } => "backup.source_unreadable",
+            CoreError::BackupPathUnsupported { .. } => "backup.unsupported_path",
             CoreError::BackupVerificationFailed { .. } => "backup.verification_failed",
             CoreError::BackupWriteFailed { .. } => "backup.write_failed",
             CoreError::InvalidSetManifest { .. } => "set.invalid_manifest",
@@ -426,6 +433,10 @@ impl fmt::Display for CoreError {
                 f,
                 "could not read {} during backup: {source}. The backup was stopped and no backup set was saved. Close programs that may be using the file, then run the backup again.",
                 path.display()
+            ),
+            CoreError::BackupPathUnsupported { path, reason } => write!(
+                f,
+                "the source path {path:?} cannot be recorded safely in a portable backup: {reason}. No backup set was saved. Rename or move the affected item, or choose a different source, then try again."
             ),
             CoreError::BackupVerificationFailed { detail } => write!(
                 f,

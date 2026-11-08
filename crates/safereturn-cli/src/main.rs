@@ -52,7 +52,20 @@ fn main() {
 }
 
 fn run() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `env::args` panics on non-Unicode input. Refuse before starting any
+    // operation instead, and never echo the argument (it could be a secret).
+    let args: Vec<String> = match std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string())
+        .collect()
+    {
+        Ok(args) => args,
+        Err(_) => {
+            eprintln!("Error: a command-line argument is not valid Unicode. Use Unicode names and try again.");
+            eprintln!("What was not changed: No operation was started; nothing was written.");
+            return EXIT_USAGE;
+        }
+    };
     let Some(cmd) = args.first().map(|s| s.as_str()) else {
         print_usage();
         return EXIT_USAGE;
@@ -328,6 +341,9 @@ fn what_was_not_changed(err: &CoreError) -> &'static str {
         | CoreError::UnsafeRestoreDestination { .. }
         | CoreError::RestoreTargetChanged { .. } => {
             "The file named in the error was not intentionally replaced; earlier files may already have been restored."
+        }
+        CoreError::BackupPathUnsupported { .. } => {
+            "No new backup set or chunks were written; source files and earlier sets were not changed."
         }
         CoreError::SourceUnreadable { .. }
         | CoreError::BackupVerificationFailed { .. }
