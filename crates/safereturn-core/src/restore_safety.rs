@@ -76,13 +76,14 @@ pub(crate) fn join_relative(base: &Path, relative: &str) -> Result<PathBuf> {
     Ok(base.join(relative))
 }
 
-/// Detect exact duplicates, common case-insensitive aliases, and a recorded
-/// file that is also a parent directory of another recorded file. Unicode
-/// lowercase is a conservative approximation, not the NTFS/FAT upcase table
-/// or a complete test for short-name and filesystem-specific aliases.
+/// Detect exact duplicates, common case-insensitive file *and directory*
+/// aliases, and a recorded file that is also a parent directory of another
+/// file. Unicode lowercase approximates but does not reproduce filesystem
+/// case tables or detect every short-name and filesystem-specific alias.
 pub(crate) fn path_issues<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<PathIssue> {
     let mut issues = Vec::new();
     let mut names = BTreeMap::<String, String>::new();
+    let mut directories = BTreeMap::<String, String>::new();
     for path in paths {
         if let Some(reason) = invalid_path_reason(path) {
             issues.push(PathIssue {
@@ -91,6 +92,27 @@ pub(crate) fn path_issues<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<P
                 detail: reason.to_string(),
             });
             continue;
+        }
+        // Different spellings of an ancestor can otherwise silently merge
+        // separate directories on a case-insensitive destination even when
+        // their leaf filenames do not collide.
+        for (index, _) in path.match_indices('/') {
+            let directory = &path[..index];
+            let key = directory.to_lowercase();
+            if let Some(previous) = directories.get(&key) {
+                if previous != directory {
+                    issues.push(PathIssue {
+                        path: path.to_string(),
+                        code: "conflicting_path",
+                        detail: format!(
+                            "the directory {directory:?} aliases the recorded directory {previous:?}"
+                        ),
+                    });
+                    break;
+                }
+            } else {
+                directories.insert(key, directory.to_string());
+            }
         }
         let key = path.to_lowercase();
         if let Some(previous) = names.get(&key) {

@@ -17,11 +17,14 @@ ready until the VM and sacrificial-disk gates in the architecture plan pass.
   slash-separated relative paths. Absolute paths, `.`/`..`, empty components,
   backslashes, colons (including Windows alternate streams), forbidden/control
   characters, trailing spaces or dots, and Windows device names are rejected.
-  Exact duplicates, common case-insensitive collisions, and file-versus-parent
-  conflicts are rejected too. Quick Check reports these as `unsafe_path`,
-  `duplicate_path`, or `conflicting_path`; backup finalization refuses to
-  publish a newly captured set with these problems. Some filenames valid on
-  non-Windows filesystems are therefore not accepted as portable backups.
+  Exact duplicates, common case-insensitive file and directory collisions,
+  and file-versus-parent conflicts are rejected too. Quick Check reports these
+  as `unsafe_path`, `duplicate_path`, or `conflicting_path`; new backups reject
+  these names during enumeration, before writing chunks. Older sets containing
+  differently cased directory aliases can now fail Quick Check and refuse a
+  restore plan, including single-file plans. Preserve the backup and seek a
+  known-good copy or support rather than editing the only manifest. Some names
+  valid on non-Windows filesystems are not accepted as portable backups.
 - The built-in directory-backed system-restore simulator also validates each
   partition-relative path from its plan before creating partition directories.
   A caller of the lower-level `restore_entries` API still supplies its own
@@ -78,11 +81,12 @@ ready until the VM and sacrificial-disk gates in the architecture plan pass.
   files does not establish directory-entry or power-loss durability.
 - The manifest is plaintext and not authenticated. Path and consistency
   checks cannot establish that it is complete or that a coordinated change
-  to a chunk list and file hash is genuine. Capture also normalizes backslashes
-  and uses lossy conversion for non-Unicode names; on non-Windows sources it
-  can record some original names differently. A passing Quick Check is not a
-  guarantee that source names, the target, operating system, or boot
-  environment can be restored successfully.
+  to a chunk list and file hash is genuine. New captures reject unrepresentable
+  names, but sets made before this check may already contain changed names;
+  Quick Check cannot identify the originals. Root labels are intentionally
+  slugged and empty directories are not stored. A passing check is not a
+  guarantee that source names, the target, operating system, or boot environment
+  can be restored successfully; see `BACKUP_INTEGRITY.md` for capture limits.
 - The original unencrypted `plain::ChunkStore` is a prototype, not covered by
   these production-store safeguards. Custom system-restore executors must
   enforce their own destination safety. The built-in live disk executor is

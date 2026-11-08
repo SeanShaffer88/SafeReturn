@@ -9,8 +9,8 @@
 //! described in the set manifest.
 //!
 //! Two implementations:
-//! - [`LiveSource`] — the pre-S3 behavior, unchanged: logical and actual
-//!   paths are the same. Default for every existing caller.
+//! - [`LiveSource`] — logical and actual paths are the same, using the
+//!   host's native path syntax. Default for existing callers.
 //! - [`MappedSource`] — prefix mapping for snapshot capture: logical
 //!   paths on one volume (`C:\…`) are opened under a different root —
 //!   on Windows, the snapshot's device object
@@ -24,6 +24,7 @@
 //! depend on a device object that no longer exists.
 
 use crate::error::{CoreError, Result};
+use crate::restore_safety::validate_relative_path;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -64,13 +65,28 @@ pub trait CaptureSource {
     /// returned path.
     fn resolve_root(&self, root: &Path) -> Result<PathBuf>;
 
+    /// The final *logical* root component, never the resolved device name.
+    /// The default interprets roots using the host's native path syntax.
+    /// Sources accepting another syntax must override this method, so a
+    /// selected file keeps its real name rather than a normalized guess.
+    fn logical_root_name(&self, root: &Path) -> Result<Option<String>> {
+        let text = unicode_path(root)?;
+        Ok(root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            // Preserve the historical display label for roots such as C:\
+            // and for "."; there is normally no file at such a root.
+            .or_else(|| last_path_segment(text)))
+    }
+
     /// The capture mode manifests must record for sets read through
     /// this source.
     fn capture_mode(&self) -> CaptureMode;
 }
 
-/// The live filesystem: logical path = actual path. This is exactly the
-/// pre-S3 behavior; existing callers get it by default.
+/// The live filesystem: logical path = actual path. Existing callers get
+/// it by default; names use the host's native path syntax.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LiveSource;
 
@@ -120,9 +136,11 @@ impl MappedSource {
 
 impl CaptureSource for MappedSource {
     fn resolve_root(&self, root: &Path) -> Result<PathBuf> {
-        let logical = root.to_string_lossy().into_owned();
+        // A lossy conversion could resolve a different snapshot file whose
+        // name contains the replacement character. Refuse instead.
+        let logical = unicode_path(root)?;
         let outside = || CoreError::CaptureRootOutsideVolume {
-            root: logical.clone(),
+            root: logical.to_owned(),
             volume: self.volume.clone(),
         };
         // The root must start with the volume designator, followed by
@@ -144,10 +162,21 @@ impl CaptureSource for MappedSource {
                 // A ".." would escape the snapshot root: the resolved
                 // path would no longer be the logical path's content.
                 ".." => return Err(outside()),
-                part => actual.push(part),
+                part => {
+                    // In particular, never push a drive/stream component
+                    // like `D:foo`, which has special meaning on Windows.
+                    validate_source_component(part, root)?;
+                    actual.push(part);
+                }
             }
         }
         Ok(actual)
+    }
+
+    fn logical_root_name(&self, root: &Path) -> Result<Option<String>> {
+        // Snapshot roots use Windows separators even when the mapping is
+        // exercised on another host (e.g. in tests or cross-platform tools).
+        Ok(last_path_segment(unicode_path(root)?))
     }
 
     fn capture_mode(&self) -> CaptureMode {
@@ -155,16 +184,37 @@ impl CaptureSource for MappedSource {
     }
 }
 
-/// The last segment of a path string, treating both `/` and `\` as
-/// separators. Set display names derive from *logical* roots, and a
-/// logical root may be written Windows-style (`C:\Users\Sam\Docs`) on
-/// any host OS — `Path::file_name` would only split on the host's
-/// separator and produce a different (wrong) name in tests and in
-/// cross-platform tooling.
-pub(crate) fn last_path_segment(path: &Path) -> Option<String> {
-    path.to_string_lossy()
-        .split(['\\', '/'])
+/// Convert only when the *whole logical path* is valid Unicode. The manifest
+/// is UTF-8 and must not identify a different path by using replacement text.
+pub(crate) fn unicode_path(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| CoreError::BackupPathUnsupported {
+            path: path.to_path_buf(),
+            reason: "the path is not valid Unicode".to_string(),
+        })
+}
+
+/// Validate a single source filename, not a pre-normalized path. Slash
+/// cannot be part of a native filename, or of a custom logical root name.
+pub(crate) fn validate_source_component(name: &str, path: &Path) -> Result<()> {
+    if name.contains('/') {
+        return Err(CoreError::BackupPathUnsupported {
+            path: path.to_path_buf(),
+            reason: "a source name contains a path separator".to_string(),
+        });
+    }
+    validate_relative_path(name).map_err(|error| match error {
+        CoreError::UnsafeRestorePath { reason, .. } => CoreError::BackupPathUnsupported {
+            path: path.to_path_buf(),
+            reason,
+        },
+        other => other,
+    })
+}
+
+fn last_path_segment(path: &str) -> Option<String> {
+    path.split(['\\', '/'])
         .rev()
         .find(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(str::to_owned)
 }
