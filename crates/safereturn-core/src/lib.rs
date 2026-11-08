@@ -72,7 +72,8 @@ pub use plain::{ChunkStore, FileEntry, Manifest, VerifyReport, CHUNK_SIZE};
 pub use capture::{CaptureMode, CaptureSource, LiveSource, MappedSource};
 pub use crypto::{KdfParams, VolumeKey, WrappedKey};
 pub use engine::{
-    format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry, FileRehearsalReport,
+    format_bytes, now_unix, select_rehearsal_files, Engine, FileRehearsalEntry,
+    FileRehearsalReport, BACKUP_WITH_SKIPS_MESSAGE, BACKUP_WITH_SKIPS_SUMMARY_ID,
 };
 pub use media::{
     plan_media, plan_media_checked, read_media_manifest, write_media_manifest, MediaFacts,

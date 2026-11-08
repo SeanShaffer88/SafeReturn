@@ -156,7 +156,9 @@ pub(crate) fn validate_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Re
     Ok(())
 }
 
-fn is_link_or_reparse(meta: &Metadata) -> bool {
+/// Recognize filesystem links and, on Windows, all reparse-point types.
+/// Call only with metadata obtained without following the final component.
+pub(crate) fn is_link_or_reparse(meta: &Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;
     }

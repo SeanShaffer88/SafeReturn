@@ -15,8 +15,8 @@ use crate::crypto::random_array;
 use crate::error::{io_at, CoreError, Result};
 use crate::hex;
 use crate::restore_safety::{
-    inspect_directory, inspect_file, join_relative, path_issues, validate_paths,
-    validate_relative_path,
+    inspect_directory, inspect_file, is_link_or_reparse, join_relative, path_issues,
+    validate_paths, validate_relative_path,
 };
 use crate::volume::{sha256_hex, UnlockedVolume};
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,8 @@ pub fn summarize(manifest: &SetManifest) -> CatalogSet {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackupOutcome {
+    /// Published set. A nonempty `skipped` list means the capture omitted
+    /// entries; an empty list does not prove all intended files were seen.
     pub manifest: SetManifest,
     /// Chunks physically written by this backup.
     pub chunks_written: u64,
@@ -220,11 +222,121 @@ fn source_relative_path(logical_root: &Path, relative: &Path) -> Result<String> 
     Ok(parts.join("/"))
 }
 
-/// Walk the roots (through the capture source) and enumerate regular
-/// files. Child entries detected as symlinks and non-regular entries are
-/// recorded as skipped. Root links, ancestor links, other reparse points,
-/// and concurrent changes are not comprehensively fenced; see the backup
-/// integrity notes. Set paths use the logical root, not the device path.
+/// Make relative paths inspectable from the current directory without
+/// changing what a normal filesystem open would address. Windows drive-
+/// relative paths have per-drive working-directory semantics and are
+/// refused rather than inspecting a different path from the one opened.
+fn absolute_source_path(path: &Path, logical: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        #[cfg(windows)]
+        if matches!(path.components().next(), Some(Component::Prefix(_))) {
+            return Err(CoreError::UnsafeBackupSource {
+                path: logical.to_path_buf(),
+                reason: "drive-relative paths are not supported; use an absolute path".to_string(),
+            });
+        }
+        let cwd = std::env::current_dir().map_err(|source| CoreError::SourceUnreadable {
+            path: logical.to_path_buf(),
+            source,
+        })?;
+        cwd.join(path)
+    };
+    // A trailing separator can make lstat-like APIs follow a directory
+    // symlink. Remove only redundant separators/current-dir components;
+    // keep `..` so every traversed ancestor is still inspected.
+    Ok(absolute.components().collect())
+}
+
+/// Inspect existing source components without intentionally following a
+/// checked link. A mapped source's boundary is a trusted device anchor, not
+/// a claim about its ancestors. No handles are pinned: all checks can race.
+fn inspect_source_path(
+    path: &Path,
+    boundary: Option<&Path>,
+    logical: &Path,
+) -> Result<fs::Metadata> {
+    let absolute = absolute_source_path(path, logical)?;
+    let boundary = boundary
+        .map(|path| absolute_source_path(path, logical))
+        .transpose()?;
+    if let Some(anchor) = &boundary {
+        let relative =
+            absolute
+                .strip_prefix(anchor)
+                .map_err(|_| CoreError::UnsafeBackupSource {
+                    path: logical.to_path_buf(),
+                    reason: "the resolved source is outside its trusted capture boundary"
+                        .to_string(),
+                })?;
+        if relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(CoreError::UnsafeBackupSource {
+                path: logical.to_path_buf(),
+                reason: "the resolved source escapes its trusted capture boundary".to_string(),
+            });
+        }
+    }
+
+    let mut components = Vec::new();
+    let mut reached_boundary = boundary.is_none();
+    for component in absolute.ancestors() {
+        if boundary.as_deref() == Some(component) {
+            reached_boundary = true;
+            break;
+        }
+        if !component.as_os_str().is_empty() {
+            components.push(component);
+        }
+    }
+    if !reached_boundary {
+        return Err(CoreError::UnsafeBackupSource {
+            path: logical.to_path_buf(),
+            reason: "the capture boundary is not an ancestor of the resolved source".to_string(),
+        });
+    }
+    // The anchor itself is inspected when it is the selected root. When
+    // opening descendants it remains an opaque, trusted device anchor.
+    if components.is_empty() {
+        components.push(&absolute);
+    }
+    let mut final_meta = None;
+    for component in components.into_iter().rev() {
+        let meta =
+            fs::symlink_metadata(component).map_err(|source| CoreError::SourceUnreadable {
+                path: logical.to_path_buf(),
+                source,
+            })?;
+        if is_link_or_reparse(&meta) {
+            let name = component
+                .file_name()
+                .unwrap_or_else(|| component.as_os_str());
+            return Err(CoreError::UnsafeBackupSource {
+                path: logical.to_path_buf(),
+                reason: format!("the component {name:?} is a symbolic link or reparse point"),
+            });
+        }
+        if component != absolute.as_path() && !meta.is_dir() {
+            return Err(CoreError::UnsafeBackupSource {
+                path: logical.to_path_buf(),
+                reason: "a source ancestor is no longer a folder".to_string(),
+            });
+        }
+        final_meta = Some(meta);
+    }
+    final_meta.ok_or_else(|| CoreError::UnsafeBackupSource {
+        path: logical.to_path_buf(),
+        reason: "the source path could not be inspected".to_string(),
+    })
+}
+
+/// Walk roots through the capture source. Refuse detected links in selected
+/// roots and their checked ancestors; record child links, reparse points and
+/// non-regular entries as skipped. These point-in-time checks are not a
+/// race-free containment boundary. Set paths use the logical root.
 fn enumerate(
     source: &dyn CaptureSource,
     roots: &[PathBuf],
@@ -236,10 +348,8 @@ fn enumerate(
     for (idx, root) in roots.iter().enumerate() {
         let display = &display_names[idx];
         let open_root = source.resolve_root(root)?;
-        let meta = fs::metadata(&open_root).map_err(|e| CoreError::SourceUnreadable {
-            path: root.clone(),
-            source: e,
-        })?;
+        let boundary = source.inspection_boundary();
+        let meta = inspect_source_path(&open_root, boundary, root)?;
         if meta.is_file() {
             let name =
                 root_names[idx]
@@ -265,9 +375,32 @@ fn enumerate(
         }
         let mut stack = vec![open_root.clone()];
         while let Some(dir) = stack.pop() {
+            let relative =
+                dir.strip_prefix(&open_root)
+                    .map_err(|_| CoreError::UnsafeBackupSource {
+                        path: root.clone(),
+                        reason: "an enumerated folder was outside its source root".to_string(),
+                    })?;
+            let logical_dir = root.join(relative);
+            if !inspect_source_path(&dir, boundary, &logical_dir)?.is_dir() {
+                return Err(CoreError::UnsafeBackupSource {
+                    path: logical_dir,
+                    reason: "the source folder changed while it was being enumerated".to_string(),
+                });
+            }
             let mut entries: Vec<PathBuf> = Vec::new();
-            for entry in fs::read_dir(&dir).map_err(|e| io_at(&dir, e))? {
-                entries.push(entry.map_err(|e| io_at(&dir, e))?.path());
+            for entry in fs::read_dir(&dir).map_err(|source| CoreError::SourceUnreadable {
+                path: logical_dir.clone(),
+                source,
+            })? {
+                entries.push(
+                    entry
+                        .map_err(|source| CoreError::SourceUnreadable {
+                            path: logical_dir.clone(),
+                            source,
+                        })?
+                        .path(),
+                );
             }
             entries.sort();
             for path in entries {
@@ -278,11 +411,16 @@ fn enumerate(
                     }
                 })?;
                 let set_path = format!("{display}/{}", source_relative_path(root, rel)?);
-                let ftype = fs::symlink_metadata(&path).map_err(|e| io_at(&path, e))?;
-                if ftype.file_type().is_symlink() {
+                let ftype =
+                    fs::symlink_metadata(&path).map_err(|source| CoreError::SourceUnreadable {
+                        path: root.join(rel),
+                        source,
+                    })?;
+                if is_link_or_reparse(&ftype) {
                     skipped.push(SkippedEntry {
                         path: set_path,
-                        reason: "symbolic link — this entry was not followed".to_string(),
+                        reason: "symbolic link or reparse point — this entry was not followed"
+                            .to_string(),
                     });
                 } else if ftype.is_dir() {
                     stack.push(path);
@@ -309,10 +447,12 @@ fn enumerate(
 /// set on the volume, reading from the live filesystem. Progress is
 /// called as (files_done, files_total).
 ///
-/// Unsupported source names are rejected before chunk writes. A source
-/// file that cannot be read aborts with `SourceUnreadable` and **no set
-/// manifest is written**; chunks already stored may remain as dedupe pool
-/// content. No partial backup appears as a set.
+/// Unsupported source names are rejected before chunk writes. Detected
+/// selected-root or ancestor links are refused; detected child links and
+/// non-regular entries are recorded in `manifest.skipped`. These checks can
+/// race. An unreadable or detected unsafe source aborts without publishing a
+/// set; chunks already stored may remain as dedupe pool content. A saved set
+/// with skips is incomplete and must not be reported as full coverage.
 pub fn backup_tree(
     volume: &UnlockedVolume,
     label: &str,
@@ -402,13 +542,19 @@ pub(crate) fn backup_tree_with_source_progress(
     let mut chunks_written = 0u64;
     let mut chunks_reused = 0u64;
     for (i, item) in found.iter().enumerate() {
-        let entry = backup_one_file(volume, item, &mut chunks_written, &mut chunks_reused)
-            .map_err(|error| match error {
-                CoreError::SourceUnreadable { .. } => error,
-                other => CoreError::BackupWriteFailed {
-                    detail: other.to_string(),
-                },
-            })?;
+        let entry = backup_one_file(
+            volume,
+            item,
+            source.inspection_boundary(),
+            &mut chunks_written,
+            &mut chunks_reused,
+        )
+        .map_err(|error| match error {
+            CoreError::SourceUnreadable { .. } | CoreError::UnsafeBackupSource { .. } => error,
+            other => CoreError::BackupWriteFailed {
+                detail: other.to_string(),
+            },
+        })?;
         files.push(entry);
         progress(BackupPhase::Copying, i as u64 + 1, total);
     }
@@ -455,23 +601,42 @@ pub(crate) fn backup_tree_with_source_progress(
 fn backup_one_file(
     volume: &UnlockedVolume,
     item: &FoundFile,
+    boundary: Option<&Path>,
     chunks_written: &mut u64,
     chunks_reused: &mut u64,
 ) -> Result<SetFileEntry> {
-    let meta = fs::metadata(&item.source).map_err(|e| CoreError::SourceUnreadable {
-        path: item.source.clone(),
-        source: e,
-    })?;
-    let mtime_unix = meta
+    // An entry may have changed after enumeration. Reinspect immediately
+    // before opening it, but do not claim the path cannot race afterwards.
+    let meta = inspect_source_path(&item.source, boundary, &item.logical_source)?;
+    if !meta.is_file() {
+        return Err(CoreError::UnsafeBackupSource {
+            path: item.logical_source.clone(),
+            reason: "the source is no longer a regular file".to_string(),
+        });
+    }
+    let mut reader =
+        fs::File::open(&item.source).map_err(|source| CoreError::SourceUnreadable {
+            path: item.logical_source.clone(),
+            source,
+        })?;
+    let opened = reader
+        .metadata()
+        .map_err(|source| CoreError::SourceUnreadable {
+            path: item.logical_source.clone(),
+            source,
+        })?;
+    if !opened.is_file() {
+        return Err(CoreError::UnsafeBackupSource {
+            path: item.logical_source.clone(),
+            reason: "the opened source is no longer a regular file".to_string(),
+        });
+    }
+    let mtime_unix = opened
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let mut reader = fs::File::open(&item.source).map_err(|e| CoreError::SourceUnreadable {
-        path: item.source.clone(),
-        source: e,
-    })?;
     let mut hasher = Sha256::new();
     let mut chunks = Vec::new();
     let mut size = 0u64;
@@ -485,7 +650,7 @@ fn backup_one_file(
                 Ok(n) => filled += n,
                 Err(e) => {
                     return Err(CoreError::SourceUnreadable {
-                        path: item.source.clone(),
+                        path: item.logical_source.clone(),
                         source: e,
                     })
                 }

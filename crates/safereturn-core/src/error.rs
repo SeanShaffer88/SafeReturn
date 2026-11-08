@@ -96,6 +96,13 @@ pub enum CoreError {
         path: PathBuf,
         reason: String,
     },
+    /// A source root, ancestor, or previously enumerated file is a link,
+    /// reparse point, or no longer the expected kind of filesystem object.
+    /// No set is published; previously copied chunks may remain.
+    UnsafeBackupSource {
+        path: PathBuf,
+        reason: String,
+    },
     /// A newly captured set could not be read back and verified. The
     /// manifest was not published; chunks already written remain as
     /// dedupe pool content, and existing chunks are not overwritten.
@@ -335,6 +342,7 @@ impl CoreError {
             CoreError::FileNotInSet { .. } => "set.file_not_found",
             CoreError::SourceUnreadable { .. } => "backup.source_unreadable",
             CoreError::BackupPathUnsupported { .. } => "backup.unsupported_path",
+            CoreError::UnsafeBackupSource { .. } => "backup.unsafe_source",
             CoreError::BackupVerificationFailed { .. } => "backup.verification_failed",
             CoreError::BackupWriteFailed { .. } => "backup.write_failed",
             CoreError::InvalidSetManifest { .. } => "set.invalid_manifest",
@@ -437,6 +445,10 @@ impl fmt::Display for CoreError {
             CoreError::BackupPathUnsupported { path, reason } => write!(
                 f,
                 "the source path {path:?} cannot be recorded safely in a portable backup: {reason}. No backup set was saved. Rename or move the affected item, or choose a different source, then try again."
+            ),
+            CoreError::UnsafeBackupSource { path, reason } => write!(
+                f,
+                "backup stopped at source {path:?}: {reason}. No backup set was saved. Choose a source without links or reparse points, or stop changes to the source and try again. Chunks copied earlier may remain on the backup volume."
             ),
             CoreError::BackupVerificationFailed { detail } => write!(
                 f,

@@ -187,6 +187,14 @@ fn fixtures() -> Vec<(&'static str, WireMessage)> {
             })),
         ),
         (
+            "job_finished_backup_with_skips",
+            WireMessage::Event(Event::JobFinished {
+                job_id: "job-1".into(),
+                outcome: JobOutcome::Succeeded,
+                summary_id: "result.backup_succeeded_with_skips".into(),
+            }),
+        ),
+        (
             "job_finished_failed",
             WireMessage::Event(Event::JobFinished {
                 job_id: "job-1".into(),

@@ -80,6 +80,16 @@ pub trait CaptureSource {
             .or_else(|| last_path_segment(text)))
     }
 
+    /// Optional trusted physical anchor for source-path inspection. Its
+    /// ancestors, and the anchor itself when opening a descendant, are not
+    /// inspected: a caller providing one must establish that it points at
+    /// the intended source. Every resolved root must lie beneath it. Without
+    /// an anchor, all native ancestors are inspected. Checks are point in
+    /// time, not handle-relative or race-free.
+    fn inspection_boundary(&self) -> Option<&Path> {
+        None
+    }
+
     /// The capture mode manifests must record for sets read through
     /// this source.
     fn capture_mode(&self) -> CaptureMode;
@@ -177,6 +187,12 @@ impl CaptureSource for MappedSource {
         // Snapshot roots use Windows separators even when the mapping is
         // exercised on another host (e.g. in tests or cross-platform tools).
         Ok(last_path_segment(unicode_path(root)?))
+    }
+
+    fn inspection_boundary(&self) -> Option<&Path> {
+        // The snapshot device object is an opaque, caller-supplied anchor;
+        // its virtual GLOBALROOT parents are not ordinary filesystem paths.
+        Some(&self.device_root)
     }
 
     fn capture_mode(&self) -> CaptureMode {

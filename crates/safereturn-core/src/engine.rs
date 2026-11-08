@@ -73,6 +73,11 @@ use safereturn_contract::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// A saved backup with omissions must not be rendered as complete coverage.
+pub const BACKUP_WITH_SKIPS_SUMMARY_ID: &str = "result.backup_succeeded_with_skips";
+pub const BACKUP_WITH_SKIPS_MESSAGE: &str =
+    "The backup was saved, but some items were not backed up. Review the skipped list before relying on this backup.";
+
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -195,7 +200,10 @@ impl Engine {
     /// logical paths; the source resolves what to open, and the set
     /// manifest records the source's capture mode. The snapshot's life
     /// cycle (begin/finish/abort) belongs to the caller: this method
-    /// only reads while the caller's session is alive.
+    /// only reads while the caller's session is alive. A saved outcome
+    /// with `manifest.skipped` is incomplete and must not be reported
+    /// to snapshot writers as a completed backup. Even an empty skipped
+    /// list does not prove writer-component or source completeness.
     pub fn start_backup_with_source(
         &mut self,
         label: &str,
@@ -234,10 +242,15 @@ impl Engine {
                 // refresh it, but its failure must not misreport a backup
                 // that did succeed — manifests remain the source of truth.
                 let _ = crate::sets::rebuild_catalog(volume);
+                let summary_id = if outcome.manifest.skipped.is_empty() {
+                    "result.backup_succeeded"
+                } else {
+                    BACKUP_WITH_SKIPS_SUMMARY_ID
+                };
                 sink(Event::JobFinished {
                     job_id,
                     outcome: JobOutcome::Succeeded,
-                    summary_id: "result.backup_succeeded".to_string(),
+                    summary_id: summary_id.to_string(),
                 });
                 Ok(outcome)
             }
